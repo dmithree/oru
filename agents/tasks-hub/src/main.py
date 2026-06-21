@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
@@ -26,6 +27,10 @@ from pydantic import BaseModel, Field
 
 from . import coordinator, events, store
 from .config import settings
+from .ingestor import runner as ingest_runner
+from .ingestor.linear_adapter import LinearAdapter
+from .ingestor.markdown_adapter import MarkdownAdapter, detect_repo_root
+from .ingestor.reminders_adapter import RemindersAdapter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("tasks-hub")
@@ -221,6 +226,50 @@ def delete_task(task_id: str, reason: Optional[str] = Query(None)) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail="task not found")
     return {"deleted": True}
+
+
+# === Ingestion =======================================================
+
+
+class IngestRequest(BaseModel):
+    sources: list[str] = Field(default_factory=lambda: ["markdown", "reminders", "linear"])
+    dry_run: bool = False
+    agent: str = "ingestor"
+    personal_agent_root: Optional[str] = None
+    reminders_file: Optional[str] = None
+
+
+def _build_adapters(req: IngestRequest) -> list:
+    adapters: list = []
+    if "markdown" in req.sources:
+        root = Path(req.personal_agent_root) if req.personal_agent_root else detect_repo_root()
+        adapters.append(MarkdownAdapter(repo_root=root))
+    if "reminders" in req.sources:
+        rem_path = Path(req.reminders_file or "/opt/state/reminders.json")
+        adapters.append(RemindersAdapter(file_path=rem_path))
+    if "linear" in req.sources:
+        adapters.append(LinearAdapter())
+    return adapters
+
+
+@app.post("/ingest")
+async def ingest(body: IngestRequest) -> dict:
+    """Run the universal ingestor across the requested sources.
+
+    Same code path the migration script uses — exposed over HTTP so
+    other agents (or a scheduler) can trigger refresh without exec'ing
+    into the container. `dry_run=true` reports without mutating.
+    """
+    adapters = _build_adapters(body)
+    if not adapters:
+        raise HTTPException(status_code=400, detail="no valid sources in request")
+
+    def _run() -> dict:
+        report = ingest_runner.run_adapters(adapters, dry_run=body.dry_run, agent=body.agent)
+        return report.as_dict()
+
+    report_dict = await asyncio.to_thread(_run)
+    return {"ok": True, "dry_run": body.dry_run, "report": report_dict}
 
 
 # === Entry ===========================================================
