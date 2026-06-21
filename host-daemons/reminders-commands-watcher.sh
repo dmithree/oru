@@ -18,7 +18,10 @@
 
 set -e
 
-STATE_DIR="/Users/dmitry/Documents/GitHub/oru/state"
+# Canonical state path (avoid the ~/Documents symlink so launchd
+# doesn't hit TCC). Container reads the same files via the oru/state
+# bind mount.
+STATE_DIR="${ORU_STATE_DIR:-$HOME/Library/Application Support/oru-host-state}"
 QUEUE="${STATE_DIR}/reminders-commands.jsonl"
 CURSOR="${STATE_DIR}/reminders-commands-cursor"
 LOG="${STATE_DIR}/reminders-commands-log.jsonl"

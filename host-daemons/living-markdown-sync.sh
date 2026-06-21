@@ -6,8 +6,13 @@
 set -e
 
 ENDPOINT="${TASKS_HUB_URL:-http://127.0.0.1:8004}/render/living?format=markdown"
-DEST="${LIVING_DEST:-/Users/dmitry/Documents/GitHub/personal-agent/everything/all-tasks.md}"
-LOG="${LIVING_LOG:-/Users/dmitry/Library/Logs/oru-living-markdown-sync.log}"
+# Default destination is TCC-friendly. To sync into personal-agent's
+# everything/all-tasks.md, set LIVING_DEST in the launchd plist AND
+# grant Full Disk Access to /bin/bash in System Settings -> Privacy &
+# Security -> Full Disk Access (otherwise writing into ~/Documents is
+# blocked for launchd-spawned processes on macOS Sonoma+).
+DEST="${LIVING_DEST:-$HOME/Library/Application Support/oru-host-state/all-tasks.md}"
+LOG="${LIVING_LOG:-$HOME/Library/Logs/oru-living-markdown-sync.log}"
 
 mkdir -p "$(dirname "$LOG")"
 

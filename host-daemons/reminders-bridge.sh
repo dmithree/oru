@@ -5,7 +5,10 @@
 
 set -e
 
-OUT_DIR="/Users/dmitry/Documents/GitHub/oru/state"
+# Use the canonical (non-symlink) state path so launchd-spawned bash
+# doesn't trip macOS TCC on the Documents folder. The same dir is
+# symlinked into oru/state so containers see it under the bind mount.
+OUT_DIR="${ORU_STATE_DIR:-$HOME/Library/Application Support/oru-host-state}"
 OUT_FILE="${OUT_DIR}/reminders.json"
 mkdir -p "$OUT_DIR"
 

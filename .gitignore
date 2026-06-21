@@ -10,4 +10,5 @@ __pycache__/
 # Secrets and runtime state (never commit)
 secrets/
 state/
+state            # symlink created by host-daemons/install.sh
 
