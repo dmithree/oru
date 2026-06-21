@@ -54,8 +54,15 @@ class RemindersAdapter:
         "Дом": "@home",
         "Inbox": "@inbox",
     })
+    # Pull-direction (idea 5 completion): when a previously-ingested
+    # ext_id is missing from the new snapshot AND the store still has
+    # it open, the user must have completed/deleted the reminder in
+    # Reminders.app. The runner uses these to emit TaskCompleted.
+    _last_snapshot_ext_ids: set[str] = field(default_factory=set, init=False)
 
     def read(self) -> Iterator[RawTask]:
+        self._last_snapshot_ext_ids = set()
+
         if not self.file_path.exists():
             logger.info("reminders adapter: snapshot file missing at %s", self.file_path)
             return
@@ -66,7 +73,12 @@ class RemindersAdapter:
             return
 
         if data.get("error") and not data.get("reminders"):
+            # An error snapshot tells us nothing — we deliberately do
+            # NOT mark anything done, because the snapshot is empty by
+            # accident (AppleEvent timeout) rather than because the
+            # user cleared their lists.
             logger.info("reminders adapter: snapshot reported error %r and is empty", data["error"])
+            self._last_snapshot_ext_ids = None  # type: ignore[assignment]
             return
 
         for r in data.get("reminders", []):
@@ -90,6 +102,8 @@ class RemindersAdapter:
                 overrides["priority"] = "P1"
 
             ext_id = _stable_ext_id(name, list_name, due_raw)
+            self._last_snapshot_ext_ids.add(ext_id)
+
             yield RawTask(
                 text=name,
                 source=f"reminders:list:{list_name or 'unknown'}",
@@ -104,6 +118,17 @@ class RemindersAdapter:
                 },
                 overrides=overrides,
             )
+
+    def disappeared_ext_ids(self, known_open_ext_ids: set[str]) -> set[str]:
+        """Return ext_ids that were in the store last time as open but
+        are NOT in the latest snapshot. Caller closes them.
+
+        Returns empty set if the snapshot was an error one (signal:
+        adapter sets self._last_snapshot_ext_ids = None) so we never
+        close tasks because of an AppleEvent timeout."""
+        if self._last_snapshot_ext_ids is None:
+            return set()
+        return known_open_ext_ids - self._last_snapshot_ext_ids
 
 
 if __name__ == "__main__":

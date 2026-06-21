@@ -241,8 +241,67 @@ def run_adapters(
                     dry_run=dry_run,
                     agent=agent,
                 )
+
+            # Pull-direction sync for Reminders (idea 5 completion):
+            # any open store task whose ext_id is gone from the latest
+            # snapshot must have been completed/deleted in Reminders.app.
+            # The adapter exposes disappeared_ext_ids(); see its docstring
+            # for why an error-snapshot skips this safely.
+            if hasattr(adapter, "disappeared_ext_ids"):
+                _sync_disappeared_reminders(
+                    adapter, report=report,
+                    dry_run=dry_run, agent=agent,
+                )
         except Exception as e:  # noqa: BLE001
             logger.exception("ingestor: adapter %s crashed", adapter.name)
             report.errors.append(f"{adapter.name}: {e}")
 
     return report
+
+
+def _sync_disappeared_reminders(
+    adapter: Any,
+    *,
+    report: IngestReport,
+    dry_run: bool,
+    agent: str,
+) -> None:
+    """For each open reminders-sourced task whose ext_id is missing from
+    the latest snapshot, transition to done (completed_via=
+    'reminders-snapshot-diff'). Skips entirely when the snapshot was
+    an error (adapter signals via disappeared_ext_ids returning empty
+    set in that case)."""
+    open_rem = store.list_tasks(
+        status=["open", "next", "doing", "waiting", "blocked", "deferred"],
+        source_prefix="reminders:",
+        limit=2000,
+    )
+    by_ext: dict[str, dict[str, Any]] = {
+        t["ext_id"]: t for t in open_rem if t.get("ext_id")
+    }
+    if not by_ext:
+        return
+
+    missing = adapter.disappeared_ext_ids(set(by_ext.keys()))
+    if not missing:
+        return
+
+    for ext_id in missing:
+        task = by_ext[ext_id]
+        if dry_run:
+            report.bump(adapter.name, "closed")
+            report.sample(adapter.name, "closed", {
+                "id": task["id"][:8],
+                "text": task["text"],
+                "via": "snapshot_diff",
+            })
+            continue
+        try:
+            coordinator.change_status(
+                task["id"], "done",
+                agent=agent, completed_via="reminders-snapshot-diff",
+            )
+            report.bump(adapter.name, "closed")
+        except Exception as e:  # noqa: BLE001
+            report.bump(adapter.name, "error")
+            report.errors.append(f"reminders snapshot close {task['id'][:8]}: {e}")
