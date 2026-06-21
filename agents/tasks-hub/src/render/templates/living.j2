@@ -1,0 +1,46 @@
+{# Living markdown view — auto-generated from oru tasks.db.
+   Replaces personal-agent/everything/all-tasks.md.
+   Edits must happen at the source (Reminders, markdown file, agent emitter). #}
+{% macro line(t) -%}
+- {{ t.text }}
+{%- if t.due_at %} ({{ t.due_at|fmt_due }}){% endif %}
+{%- if t.context_tags %} {{ t.context_tags|fmt_tags }}{% endif %}
+{%- if t.effort_min %} {{ t.effort_min|fmt_effort }}{% endif %}
+{%- if t.priority %} !{{ t.priority }}{% endif %}
+{%- if t.status != 'open' %} [{{ t.status }}]{% endif %}
+{%- endmacro %}
+# All Tasks (живая view)
+
+> **AUTO-GENERATED.** Источник правды — `oru/state/tasks.db`.
+> Сгенерировано: {{ generated_at }}.
+> Изменения вноси в источник (Reminders / markdown / агенты),
+> не в этот файл — он пересоздаётся.
+
+{% set total_tasks = view.totals.tasks %}
+**Total: {{ total_tasks }} задач**
+
+{% if not sections or total_tasks == 0 %}
+Пусто. Либо store не наполнен, либо все задачи закрыты.
+{% else %}
+{# Group by source prefix (everything before the first ':') #}
+{% set groups = {} %}
+{% for s in sections %}
+{% for t in s.tasks %}
+{% set src = t.source %}
+{% set prefix = src.split(':')[0] %}
+{% if prefix not in groups %}
+{% set _ = groups.__setitem__(prefix, []) %}
+{% endif %}
+{% set _ = groups[prefix].append(t) %}
+{% endfor %}
+{% endfor %}
+{% for prefix, tasks in groups|dictsort %}
+
+## {{ prefix }} ({{ tasks|length }})
+
+{% for t in tasks %}
+{{ line(t) }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}

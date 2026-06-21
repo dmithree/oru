@@ -25,7 +25,7 @@ import uvicorn
 from fastapi import Body, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import coordinator, debrief as debrief_module, events, reminders_commands, store
+from . import backpressure as bp, coordinator, debrief as debrief_module, events, reminders_commands, store
 from .config import settings
 from .ingestor import runner as ingest_runner
 from .ingestor.linear_adapter import LinearAdapter
@@ -264,6 +264,69 @@ def _build_adapters(req: IngestRequest) -> list:
     return adapters
 
 
+# === Backpressure (idea 18) ==========================================
+
+
+@app.get("/stale")
+def stale(
+    older_than_days: int = Query(30, ge=1, le=365),
+    limit: int = Query(20, ge=1, le=200),
+) -> dict:
+    tasks = bp.find_stale(older_than_days=older_than_days, limit=limit)
+    return {
+        "tasks": tasks,
+        "count": len(tasks),
+        "summary": bp.summary(older_than_days=older_than_days),
+    }
+
+
+class StaleDecision(BaseModel):
+    id: str
+    action: str   # "keep" | "drop" | "defer"
+    defer_until: Optional[str] = None
+
+
+class StaleTriage(BaseModel):
+    items: list[StaleDecision]
+    agent: str = "backpressure"
+
+
+@app.post("/stale/triage")
+def stale_triage(body: StaleTriage) -> dict:
+    results: list[dict[str, Any]] = []
+    for item in body.items:
+        row: dict[str, Any] = {"id": item.id, "action": item.action}
+        try:
+            if item.action == "keep":
+                # Touch the task so it falls out of the stale window
+                task = coordinator.update(item.id, agent=body.agent, raw=None)
+                row["ok"] = True
+                row["status"] = task["status"]
+            elif item.action == "drop":
+                task = coordinator.change_status(item.id, "dropped",
+                                                 agent=body.agent, reason="stale_cleanup")
+                row["ok"] = True
+            elif item.action == "defer":
+                if not item.defer_until:
+                    raise ValueError("defer requires defer_until")
+                task = coordinator.change_status(item.id, "deferred",
+                                                 agent=body.agent,
+                                                 defer_until=item.defer_until,
+                                                 reason="stale_cleanup")
+                row["ok"] = True
+            else:
+                raise ValueError(f"unknown action: {item.action!r}")
+        except KeyError:
+            row["ok"] = False
+            row["error"] = "not_found"
+        except (ValueError, store.InvalidTransition) as e:
+            row["ok"] = False
+            row["error"] = str(e)
+        results.append(row)
+    ok = sum(1 for r in results if r["ok"])
+    return {"results": results, "summary": {"ok": ok, "failed": len(results) - ok}}
+
+
 # === Debrief =========================================================
 
 
@@ -367,7 +430,11 @@ def inbox_triage(body: BulkTriage) -> dict:
 # === Render ==========================================================
 
 
-_DEFAULT_TEMPLATE = {"morning": "morning.j2", "evening": "evening.j2"}
+_DEFAULT_TEMPLATE = {
+    "morning": "morning.j2",
+    "evening": "evening.j2",
+    "living":  "living.j2",
+}
 
 
 @app.get("/render/{view_name}")

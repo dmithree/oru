@@ -186,7 +186,7 @@ def compile_order(order: list[str] | None) -> str:
         # whitelist columns to avoid SQL injection via yaml
         if col not in {
             "created_at", "updated_at", "closed_at", "due_at", "defer_until",
-            "priority", "effort_min", "status", "cog_type", "text",
+            "priority", "effort_min", "status", "cog_type", "text", "source",
         }:
             raise ValueError(f"unknown order column: {col!r}")
         if col == "due_at":
@@ -222,9 +222,11 @@ def _ro_connect() -> Iterator[sqlite3.Connection]:
 
 
 def run_section(section: dict[str, Any], *, today: Optional[date] = None) -> list[dict[str, Any]]:
+    limit = int(section.get("limit", 50))
+    if limit <= 0:
+        return []
     where_sql, args = compile_where(section.get("where", {}), today=today)
     order_sql = compile_order(section.get("order"))
-    limit = int(section.get("limit", 50))
     sql = f"SELECT * FROM tasks WHERE {where_sql} {order_sql} LIMIT ?"
     args.append(limit)
 
@@ -252,24 +254,82 @@ def load_view(view_name: str, *, search_dirs: Optional[list[Path]] = None) -> di
     raise FileNotFoundError(f"view not found: {fname}")
 
 
+def _load_personal_context() -> dict[str, Any]:
+    p = Path(settings.personal_context_file)
+    if not p.exists():
+        return {}
+    try:
+        import json
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _apply_adaptive(section: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Adaptive filtering hook (idea 17). Reads personal-context.json
+    and shrinks plan / drops irrelevant contexts based on health and
+    travel state.
+
+    Returns a (possibly mutated) copy of `section`. Original spec
+    untouched so the same yaml stays cache-friendly.
+
+    Conservative rules — they only TRIM the plan, never silently
+    inject filters that would zero-out user-tagged tasks:
+
+      - health.state == "recovery_needed"
+          plan_333_* sections: limit = max(1, limit // 2). Priority
+          filters NOT auto-injected so unscored tasks still surface.
+      - travel.active_trip present
+          plan_333_* sections that explicitly target @home or @office
+          are dropped (limit=0 -> view drops them as optional).
+          @city is NOT auto-injected — that's the user's call when
+          they tag their travel tasks.
+    """
+    if not context:
+        return section
+    health = (context.get("health") or {})
+    travel = (context.get("travel") or {})
+    out = dict(section)
+    where = dict(out.get("where") or {})
+    sid = (out.get("id") or "").lower()
+
+    if health.get("state") == "recovery_needed" and sid.startswith("plan_333_"):
+        cur_limit = int(out.get("limit", 5))
+        out["limit"] = max(1, cur_limit // 2)
+
+    if travel.get("active_trip"):
+        tag = where.get("context_tag")
+        if tag in {"@home", "@office"}:
+            out["limit"] = 0
+            out["optional"] = True
+
+    out["where"] = where
+    return out
+
+
 def run_view(
     view_name_or_spec: str | dict[str, Any],
     *,
     today: Optional[date] = None,
     search_dirs: Optional[list[Path]] = None,
+    context: Optional[dict[str, Any]] = None,
+    adaptive: bool = True,
 ) -> dict[str, Any]:
     """Run all sections of a view. Returns:
 
         {
           "view": "morning_brief",
           "generated_at": "...",
+          "context_applied": {...},   # only when adaptive adjustments fired
           "sections": [
             {"id": "carry_over", "title": "...", "tasks": [...]},
-            {"id": "overdue",    "title": "...", "tasks": [...]},
             ...
           ],
           "totals": {"sections": N, "tasks": M},
         }
+
+    When `adaptive=True` (default), personal-context.json is consulted
+    and idea 17 adjustments are applied per section.
     """
     from datetime import datetime, timezone
 
@@ -278,26 +338,40 @@ def run_view(
         if isinstance(view_name_or_spec, str) else view_name_or_spec
     )
 
+    ctx = context if context is not None else (_load_personal_context() if adaptive else {})
+
     sections_out: list[dict[str, Any]] = []
     total_tasks = 0
 
     for section in spec.get("sections") or []:
         sid = section.get("id") or section.get("title", "unnamed")
-        tasks = run_section(section, today=today)
-        optional = bool(section.get("optional"))
+        adjusted = _apply_adaptive(section, ctx) if adaptive else section
+        tasks = run_section(adjusted, today=today)
+        optional = bool(adjusted.get("optional"))
         if optional and not tasks:
             continue
         sections_out.append({
             "id": sid,
-            "title": section.get("title", sid),
+            "title": adjusted.get("title", sid),
             "tasks": tasks,
         })
         total_tasks += len(tasks)
 
-    return {
+    out = {
         "view": spec.get("name") or (view_name_or_spec if isinstance(view_name_or_spec, str) else "inline"),
         "description": spec.get("description"),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sections": sections_out,
         "totals": {"sections": len(sections_out), "tasks": total_tasks},
     }
+    if adaptive and ctx:
+        # Surface what was applied so the brief can show "today is a
+        # recovery day, plan was trimmed".
+        signals = {}
+        if (ctx.get("health") or {}).get("state"):
+            signals["health_state"] = ctx["health"]["state"]
+        if (ctx.get("travel") or {}).get("active_trip"):
+            signals["traveling_to"] = ctx["travel"]["active_trip"].get("destination")
+        if signals:
+            out["context_applied"] = signals
+    return out

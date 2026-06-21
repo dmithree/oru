@@ -1,0 +1,15 @@
+name: living_all_tasks
+description: |
+  Living markdown view — replacement for personal-agent's static
+  everything/all-tasks.md. One big section grouped by source prefix
+  (markdown:..., reminders:..., linear:..., agent:..., debrief,
+  manual). Rendered hourly; intended to be auto-generated and
+  read-only — edits should happen at the source.
+
+sections:
+  - id: all
+    title: "Все открытые"
+    where:
+      status: [open, next, doing, waiting, blocked, deferred]
+    order: [-priority, due_at, source]
+    limit: 2000
