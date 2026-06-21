@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     digest_cron: str = "0 18 * * SUN"
     state_file: str = "/opt/state/health.json"
 
+    # Resistance-band workout reminders (separate from the weekly digest)
+    workout_enabled: bool = True
+    workout_hour: int = 8
+    workouts_state_file: str = "/opt/state/health-workouts.json"
+
     http_host: str = "0.0.0.0"
     http_port: int = 8001
 
