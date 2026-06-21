@@ -31,6 +31,7 @@ from .ingestor import runner as ingest_runner
 from .ingestor.linear_adapter import LinearAdapter
 from .ingestor.markdown_adapter import MarkdownAdapter, detect_repo_root
 from .ingestor.reminders_adapter import RemindersAdapter
+from .ingestor.thoughts_adapter import ThoughtsAdapter
 from .render import renderer as view_renderer
 from .render import view as view_module
 
@@ -244,11 +245,12 @@ def delete_task(task_id: str, reason: Optional[str] = Query(None)) -> dict:
 
 
 class IngestRequest(BaseModel):
-    sources: list[str] = Field(default_factory=lambda: ["markdown", "reminders", "linear"])
+    sources: list[str] = Field(default_factory=lambda: ["markdown", "reminders", "linear", "thoughts"])
     dry_run: bool = False
     agent: str = "ingestor"
     personal_agent_root: Optional[str] = None
     reminders_file: Optional[str] = None
+    thoughts_queue: Optional[str] = None
 
 
 def _build_adapters(req: IngestRequest) -> list:
@@ -261,6 +263,9 @@ def _build_adapters(req: IngestRequest) -> list:
         adapters.append(RemindersAdapter(file_path=rem_path))
     if "linear" in req.sources:
         adapters.append(LinearAdapter())
+    if "thoughts" in req.sources:
+        q_path = Path(req.thoughts_queue or "/opt/state/thoughts-queue.jsonl")
+        adapters.append(ThoughtsAdapter(queue_path=q_path))
     return adapters
 
 

@@ -34,18 +34,23 @@ from ..ingestor import runner
 from ..ingestor.linear_adapter import LinearAdapter
 from ..ingestor.markdown_adapter import MarkdownAdapter, detect_repo_root
 from ..ingestor.reminders_adapter import RemindersAdapter
+from ..ingestor.thoughts_adapter import ThoughtsAdapter
 
 logger = logging.getLogger("migrate_legacy")
 
 
 def build_adapters(
     *, personal_agent_root: Path, reminders_file: Path,
+    thoughts_queue: Path | None = None,
 ) -> list[Any]:
-    return [
+    adapters: list[Any] = [
         MarkdownAdapter(repo_root=personal_agent_root),
         RemindersAdapter(file_path=reminders_file),
         LinearAdapter(),
     ]
+    if thoughts_queue:
+        adapters.append(ThoughtsAdapter(queue_path=thoughts_queue, consume=False))
+    return adapters
 
 
 def render_report(report_dict: dict[str, Any], *, dry_run: bool) -> str:

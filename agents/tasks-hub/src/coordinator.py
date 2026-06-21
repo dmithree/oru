@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from . import events, parsers, recurrence, reminders_commands, store
+from . import events, linear_writeback, parsers, recurrence, reminders_commands, store
 
 
 def create(
@@ -148,6 +148,44 @@ def change_status(
             import logging
             logging.getLogger(__name__).exception(
                 "reminders queue failed for %s: %s", task_id, e
+            )
+
+    # Linear write-back (Phase 1.6): mirror the closure to Linear so
+    # the issue board doesn't drift. Only for tasks Linear itself
+    # gave us (source=linear:*) — never push other agents' tasks into
+    # Linear.
+    if (
+        src.startswith("linear:")
+        and new_status in {"done", "dropped"}
+        and old_status not in {"done", "dropped"}
+    ):
+        try:
+            kind = "canceled" if new_status == "dropped" else "completed"
+            result = linear_writeback.close_issue(task, as_kind=kind)
+            if result.get("ok"):
+                events.emit(
+                    "TaskUpdated",
+                    task_id=task_id,
+                    agent=agent,
+                    source=src,
+                    payload={
+                        "linear_writeback": "ok",
+                        "identifier": result.get("identifier"),
+                        "linear_state": result.get("state"),
+                    },
+                )
+            else:
+                events.emit(
+                    "TaskUpdated",
+                    task_id=task_id,
+                    agent=agent,
+                    source=src,
+                    payload={"linear_writeback": "failed", "error": result.get("error")},
+                )
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "linear writeback failed for %s: %s", task_id, e
             )
 
     return task
