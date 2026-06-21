@@ -25,7 +25,7 @@ import uvicorn
 from fastapi import Body, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import coordinator, events, store
+from . import coordinator, debrief as debrief_module, events, reminders_commands, store
 from .config import settings
 from .ingestor import runner as ingest_runner
 from .ingestor.linear_adapter import LinearAdapter
@@ -99,6 +99,16 @@ class StatusChange(BaseModel):
 
 class TriageDecision(BaseModel):
     decision: str
+    agent: str = "user"
+
+
+class BulkTriageItem(BaseModel):
+    id: str
+    decision: str   # "open" | "dropped"
+
+
+class BulkTriage(BaseModel):
+    items: list[BulkTriageItem]
     agent: str = "user"
 
 
@@ -252,6 +262,106 @@ def _build_adapters(req: IngestRequest) -> list:
     if "linear" in req.sources:
         adapters.append(LinearAdapter())
     return adapters
+
+
+# === Debrief =========================================================
+
+
+class DebriefIngestRequest(BaseModel):
+    user_text: str = Field(..., min_length=1)
+    model: Optional[str] = None
+    agent: str = "debrief"
+
+
+@app.post("/debrief/ingest")
+async def debrief_ingest(body: DebriefIngestRequest) -> dict:
+    """Ingest a freeform end-of-day debrief: LLM matches statements to
+    candidate tasks, this endpoint applies the resulting events
+    (completed/deferred/blocked/waiting/created) through the
+    coordinator and writes a human-readable file to
+    state/debriefs/YYYY-MM-DD-debrief.md."""
+    if not (settings.anthropic_api_key or
+            (Path(".env").exists() and "ANTHROPIC_API_KEY" in Path(".env").read_text())):
+        # Best-effort guard; the actual check happens inside call_llm.
+        pass
+
+    def _run() -> dict[str, Any]:
+        return debrief_module.ingest_debrief(body.user_text, model=body.model, agent=body.agent)
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, **result}
+
+
+# === Reminders bridge ================================================
+
+
+@app.get("/reminders/queue")
+def reminders_queue_status() -> dict:
+    return {
+        "pending": reminders_commands.pending_count(),
+        "recent_results": reminders_commands.read_results(limit=10),
+    }
+
+
+class ReminderCreate(BaseModel):
+    name: str
+    list_name: str = "AI"
+    due: Optional[str] = None
+    body: Optional[str] = None
+    task_id: Optional[str] = None
+
+
+@app.post("/reminders/queue/create")
+def reminders_queue_create(body: ReminderCreate) -> dict:
+    cmd = reminders_commands.enqueue_create(
+        body.name,
+        list_name=body.list_name,
+        due=body.due,
+        body=body.body,
+        task_id=body.task_id,
+    )
+    return {"ok": True, "cmd": cmd}
+
+
+# === Inbox triage ====================================================
+
+
+@app.get("/inbox")
+def inbox(limit: int = Query(100, ge=1, le=500)) -> dict:
+    """List all tasks awaiting triage (status='inbox'). Newest first."""
+    tasks = store.list_tasks(status=["inbox"], limit=limit, order="updated")
+    return {"tasks": tasks, "count": len(tasks)}
+
+
+@app.post("/inbox/triage")
+def inbox_triage(body: BulkTriage) -> dict:
+    """Apply triage decisions to multiple inbox tasks at once.
+
+    Body: {items: [{id, decision: "open"|"dropped"}], agent}.
+    Returns per-item outcomes so the caller can highlight failures."""
+    results: list[dict[str, Any]] = []
+    for item in body.items:
+        try:
+            task = coordinator.triage(item.id, item.decision, agent=body.agent)
+            results.append({
+                "id": item.id,
+                "decision": item.decision,
+                "ok": True,
+                "new_status": task["status"],
+            })
+        except KeyError:
+            results.append({"id": item.id, "decision": item.decision, "ok": False, "error": "not_found"})
+        except store.InvalidTransition as e:
+            results.append({"id": item.id, "decision": item.decision, "ok": False, "error": str(e)})
+        except ValueError as e:
+            results.append({"id": item.id, "decision": item.decision, "ok": False, "error": str(e)})
+    ok_count = sum(1 for r in results if r["ok"])
+    return {"results": results, "summary": {"ok": ok_count, "failed": len(results) - ok_count}}
 
 
 # === Render ==========================================================

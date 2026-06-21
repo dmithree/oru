@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from . import events, parsers, store
+from . import events, parsers, recurrence, reminders_commands, store
 
 
 def create(
@@ -118,7 +118,114 @@ def change_status(
             payload=payload,
         )
 
+    # Recurrence respawn (idea 9): when a recurring task closes, spawn
+    # the next instance with a recalculated due_at. Only on the close
+    # transition (not reopen), and only if recurrence is valid.
+    if (
+        new_status == "done"
+        and old_status != "done"
+        and recurrence.is_valid(task.get("recurrence"))
+    ):
+        try:
+            _spawn_recurrence(task, agent=agent)
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception("recurrence spawn failed for %s: %s", task_id, e)
+
+    # Bidirectional Reminders sync (idea 5): if this task originated in
+    # Apple Reminders and is moving to done/dropped, enqueue a host
+    # command so Reminders.app reflects the closure. The host watcher
+    # applies the command via JXA within ~60s.
+    src = task.get("source") or ""
+    if (
+        src.startswith("reminders:")
+        and new_status in {"done", "dropped"}
+        and old_status not in {"done", "dropped"}
+    ):
+        try:
+            _queue_reminder_close(task, agent=agent)
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "reminders queue failed for %s: %s", task_id, e
+            )
+
     return task
+
+
+def _queue_reminder_close(task: dict[str, Any], *, agent: str) -> None:
+    """Enqueue a host-side `complete` command for a reminders-sourced task.
+
+    The host watcher matches on (name, list); we pull both from the raw
+    payload the adapter stashed, falling back to the task's text and
+    the source suffix if raw is missing.
+    """
+    raw = task.get("raw") or {}
+    name = raw.get("name") or task.get("text") or ""
+    list_name = raw.get("list")
+    if not list_name:
+        # source format: "reminders:list:<LISTNAME>"
+        prefix = "reminders:list:"
+        src = task.get("source") or ""
+        if src.startswith(prefix):
+            list_name = src[len(prefix):]
+    list_name = list_name or "AI"
+
+    reminders_commands.enqueue(
+        "complete",
+        task_id=task["id"],
+        ext_id=task.get("ext_id"),
+        name=name,
+        list=list_name,
+    )
+    events.emit(
+        "TaskUpdated",
+        task_id=task["id"],
+        agent=agent,
+        source=task.get("source"),
+        payload={"reminders_command": "complete", "list": list_name, "name": name},
+    )
+
+
+def _spawn_recurrence(parent: dict[str, Any], *, agent: str) -> dict[str, Any]:
+    """Insert a fresh open instance of `parent` with a new due_at.
+
+    The new task carries the same metadata (text, source, project,
+    owner_agent, recurrence, context_tags, cog_type, effort_min,
+    priority) so the cycle continues. parent_id points back to the
+    just-closed instance so the chain stays traceable.
+    """
+    from datetime import date
+    next_due = recurrence.next_due_from(parent["recurrence"], anchor=date.today()).isoformat()
+
+    spawned = store.create_task(
+        parent["text"],
+        source=parent.get("source", "manual"),
+        status="open",
+        priority=parent.get("priority"),
+        due_at=next_due,
+        due_precision="day",
+        context_tags=parent.get("context_tags") or [],
+        cog_type=parent.get("cog_type"),
+        effort_min=parent.get("effort_min"),
+        recurrence=parent.get("recurrence"),
+        project=parent.get("project"),
+        owner_agent=parent.get("owner_agent"),
+        parent_id=parent["id"],
+        raw=None,
+    )
+    events.emit(
+        "TaskRecurred",
+        task_id=spawned["id"],
+        agent=agent,
+        source=spawned.get("source"),
+        payload={
+            "parent_id": parent["id"],
+            "due_at": next_due,
+            "recurrence": parent.get("recurrence"),
+        },
+    )
+    return spawned
 
 
 _SPECIFIC_EVENT = {
