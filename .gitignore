@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.env
+*.log
+.DS_Store
+
+# Secrets and runtime state (never commit)
+secrets/
+state/
+

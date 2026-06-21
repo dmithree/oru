@@ -1,0 +1,63 @@
+services:
+  health:
+    build:
+      context: ./agents/health
+      dockerfile: Dockerfile
+    image: oru-health:dev
+    container_name: oru-health
+    env_file: ./secrets/health.env
+    volumes:
+      - ./state:/opt/state
+    ports:
+      - "127.0.0.1:8001:8001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  daily-briefing:
+    build:
+      context: ./agents/daily-briefing
+      dockerfile: Dockerfile
+    image: oru-daily-briefing:dev
+    container_name: oru-daily-briefing
+    env_file: ./secrets/daily-briefing.env
+    volumes:
+      - ./state:/opt/state
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/all-tasks.md:/opt/data/all-tasks.md:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/therapy:/opt/data/personal/therapy:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/coach:/opt/data/personal/coach:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/.claude/memory:/opt/data/memory:ro
+    ports:
+      - "127.0.0.1:8002:8002"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  travel-continuity:
+    build:
+      context: ./agents/travel-continuity
+      dockerfile: Dockerfile
+    image: oru-travel-continuity:dev
+    container_name: oru-travel-continuity
+    env_file: ./secrets/travel-continuity.env
+    volumes:
+      - ./state:/opt/state
+      - /Users/dmitry/Documents/GitHub/personal-agent/.claude/memory:/opt/data/memory:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/travel:/opt/data/travel
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/travel/sources.md:/opt/data/sources.md:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/travel/packing-baseline.md:/opt/data/packing-baseline.md:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/travel/templates:/opt/data/templates:ro
+    ports:
+      - "127.0.0.1:8003:8003"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
