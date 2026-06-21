@@ -1,0 +1,23 @@
+{# Morning brief — sections rendered in the order they appear in the view spec.
+   Carry-over leads. Each task gets due / tags / effort decoration if present. #}
+{% macro task_line(t) -%}
+- {{ t.text }}
+{%- if t.due_at %} ({{ t.due_at|fmt_due }}){% endif %}
+{%- if t.context_tags %} {{ t.context_tags|fmt_tags }}{% endif %}
+{%- if t.effort_min %} {{ t.effort_min|fmt_effort }}{% endif %}
+{%- if t.priority %} !{{ t.priority }}{% endif %}
+{%- endmacro %}
+# Утро — {{ today }}
+
+{% if not sections %}
+План пуст. Либо store ещё не наполнен, либо все секции опциональны и без задач.
+{% else %}
+{% for s in sections %}
+## {{ s.title }}
+
+{% for t in s.tasks %}
+{{ task_line(t) }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}

@@ -31,6 +31,8 @@ from .ingestor import runner as ingest_runner
 from .ingestor.linear_adapter import LinearAdapter
 from .ingestor.markdown_adapter import MarkdownAdapter, detect_repo_root
 from .ingestor.reminders_adapter import RemindersAdapter
+from .render import renderer as view_renderer
+from .render import view as view_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("tasks-hub")
@@ -250,6 +252,46 @@ def _build_adapters(req: IngestRequest) -> list:
     if "linear" in req.sources:
         adapters.append(LinearAdapter())
     return adapters
+
+
+# === Render ==========================================================
+
+
+_DEFAULT_TEMPLATE = {"morning": "morning.j2", "evening": "evening.j2"}
+
+
+@app.get("/render/{view_name}")
+async def render_view(
+    view_name: str,
+    format: str = Query("both", pattern="^(json|markdown|both)$"),
+    template: Optional[str] = Query(None, description="override default template"),
+) -> dict:
+    """Run a view spec against the store and optionally render markdown.
+
+    `view_name` resolves to src/render/views/<name>.yaml. Default
+    template lookup: morning -> morning.j2, evening -> evening.j2,
+    otherwise <view_name>.j2."""
+    try:
+        result = await asyncio.to_thread(view_module.run_view, view_name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"view not found: {view_name}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    out: dict[str, Any] = {"ok": True, "view": result}
+    if format in ("markdown", "both"):
+        tpl = template or _DEFAULT_TEMPLATE.get(view_name, f"{view_name}.j2")
+        try:
+            md = await asyncio.to_thread(view_renderer.render, result, template=tpl)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"render failed: {e}")
+        out["markdown"] = md
+    if format == "json":
+        out.pop("markdown", None)
+    return out
+
+
+# === Ingest ==========================================================
 
 
 @app.post("/ingest")

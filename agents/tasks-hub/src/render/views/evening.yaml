@@ -1,0 +1,57 @@
+name: evening_debrief
+description: |
+  Evening view: tasks closed today, still in progress, overdue/today-open
+  (didn't close), blocked, waiting, tomorrow's deadlines.
+  Designed to be filled by event-ingestion (idea 14) during the day.
+
+sections:
+  - id: in_progress
+    title: "В работе"
+    where:
+      status: [doing]
+    order: [-updated_at]
+    limit: 5
+    optional: true
+
+  - id: missed
+    title: "Не закрыто (дедлайн сегодня или раньше)"
+    where:
+      status: [open, next]
+      due_on_or_before: today
+    order: [due_at, -priority]
+    limit: 10
+    optional: true
+
+  - id: closed_today
+    title: "Закрыто сегодня"
+    where:
+      status: [done]
+    order: [-updated_at]
+    limit: 20
+    optional: true
+
+  - id: blocked
+    title: "Заблокировано"
+    where:
+      status: [blocked]
+    order: [-updated_at]
+    limit: 5
+    optional: true
+
+  - id: waiting
+    title: "Жду ответа"
+    where:
+      status: [waiting]
+    order: [-updated_at]
+    limit: 5
+    optional: true
+
+  - id: tomorrow_due
+    title: "Дедлайн завтра"
+    where:
+      status: [open, next]
+      due_after: today
+      due_on_or_before: tomorrow
+    order: [-priority]
+    limit: 5
+    optional: true

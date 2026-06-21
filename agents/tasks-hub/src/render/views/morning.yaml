@@ -1,0 +1,69 @@
+name: morning_brief
+description: |
+  Morning view: yesterday's carry-over, overdue, today's deadlines,
+  3-3-3 plan grouped by cog_type (no deadline required), waiting bucket.
+  Optional sections drop from output when empty so the brief stays compact.
+
+sections:
+  - id: carry_over
+    title: "Перенесено со вчера"
+    where:
+      status: [deferred]
+      defer_until_lte: today
+    order: [-priority, due_at]
+    limit: 5
+    optional: true
+
+  - id: overdue
+    title: "Просрочено"
+    where:
+      status: [open, next, doing]
+      due_before: today
+    order: [due_at]
+    limit: 5
+    optional: true
+
+  - id: today_due
+    title: "Дедлайн сегодня"
+    where:
+      status: [open, next, doing]
+      due_after: yesterday
+      due_on_or_before: today
+    order: [-priority]
+    limit: 5
+    optional: true
+
+  - id: plan_333_deep
+    title: "Deep work"
+    where:
+      status: [open, next]
+      cog_type: deep
+    order: [-priority, due_at]
+    limit: 3
+    optional: true
+
+  - id: plan_333_short
+    title: "Short"
+    where:
+      status: [open, next]
+      cog_type: short
+    order: [-priority, due_at]
+    limit: 3
+    optional: true
+
+  - id: plan_333_admin
+    title: "Admin"
+    where:
+      status: [open, next]
+      cog_type: admin
+    order: [-priority, due_at]
+    limit: 3
+    optional: true
+
+  - id: waiting
+    title: "Ждёт меня"
+    where:
+      status: [waiting]
+    order: [-updated_at]
+    limit: 5
+    optional: true

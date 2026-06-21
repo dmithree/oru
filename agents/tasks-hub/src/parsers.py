@@ -152,6 +152,31 @@ def extract_recurrence(text: str) -> Optional[str]:
 # === Combined =========================================================
 
 
+_LEADING_DASHES = re.compile(r"^[\s\-—–]+|[\s\-—–]+$")
+
+
+def clean_text(text: str) -> str:
+    """Strip all metadata tokens (deadlines, tags, effort, cog, priority,
+    recurrence) and surrounding punctuation. Returns the human display
+    form of the task — the tokens are still kept as structured fields."""
+    if not text:
+        return ""
+    t = text
+    t = _DUE_DAY_RE.sub("", t)
+    t = _DUE_MONTH_RE.sub("", t)
+    t = _TAG_RE.sub("", t)
+    t = _EFFORT_NUMERIC_RE.sub("", t)
+    t = _EFFORT_DEEP_RE.sub("", t)
+    t = _COG_RE.sub("", t)
+    t = _PRIORITY_RE.sub("", t)
+    t = _RECURRENCE_RE.sub("", t)
+    # collapse whitespace and trim trailing em-dashes left behind by
+    # stripping "— due ..." mid-sentence.
+    t = re.sub(r"\s+", " ", t).strip()
+    t = _LEADING_DASHES.sub("", t)
+    return t
+
+
 def parse_metadata(text: str) -> dict:
     """One-shot extractor. Returns a dict of all detected fields. Fields
     that aren't found are absent (not None) so the dict can be splatted
@@ -197,4 +222,5 @@ if __name__ == "__main__":
     ]
     for s in samples:
         print(f"INPUT:  {s}")
-        print(f"  meta: {parse_metadata(s)}")
+        print(f"  clean: {clean_text(s)!r}")
+        print(f"  meta:  {parse_metadata(s)}")

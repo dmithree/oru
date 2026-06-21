@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from . import events, store
+from . import events, parsers, store
 
 
 def create(
@@ -17,10 +17,24 @@ def create(
     source: str,
     agent: str = "tasks-hub",
     status: str = "open",
+    enrich: bool = True,
     **fields: Any,
 ) -> dict[str, Any]:
-    task = store.create_task(text, source=source, status=status, **fields)
-    payload = {"text": text, "status": status}
+    """Create a task. When `enrich=True` (default), the text is run
+    through parsers.parse_metadata to populate due_at, context_tags,
+    effort_min, cog_type, priority, recurrence — and stripped of those
+    inline tokens so display stays clean. Explicit kwargs always win
+    over parsed values."""
+    stored_text = text
+    if enrich:
+        parsed = parsers.parse_metadata(text)
+        for k, v in parsed.items():
+            if k not in fields or fields.get(k) is None:
+                fields[k] = v
+        stored_text = parsers.clean_text(text) or text  # never empty out
+
+    task = store.create_task(stored_text, source=source, status=status, **fields)
+    payload = {"text": stored_text, "status": status}
     payload.update({k: v for k, v in fields.items() if v is not None})
     events.emit(
         "TaskCreated",

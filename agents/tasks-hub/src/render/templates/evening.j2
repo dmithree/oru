@@ -1,0 +1,19 @@
+{% macro task_line(t) -%}
+- {{ t.text }}
+{%- if t.due_at %} ({{ t.due_at|fmt_due }}){% endif %}
+{%- if t.context_tags %} {{ t.context_tags|fmt_tags }}{% endif %}
+{%- endmacro %}
+# Вечер — {{ today }}
+
+{% if not sections %}
+Сегодня пусто. Никаких задач в работе, без переноса.
+{% else %}
+{% for s in sections %}
+## {{ s.title }}
+
+{% for t in s.tasks %}
+{{ task_line(t) }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}

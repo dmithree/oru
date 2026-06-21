@@ -135,6 +135,9 @@ def ingest_raw(
                     "effort_min", "priority", "recurrence",
                 }
             }
+            # ingestor already merged parser+overrides; let coordinator
+            # also clean the text (strip tokens). enrich=True is safe —
+            # second parse is a no-op because all fields are already set.
             task = coordinator.create(
                 rt.text,
                 source=rt.source,
