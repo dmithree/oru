@@ -61,3 +61,23 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  tasks-hub:
+    build:
+      context: ./agents/tasks-hub
+      dockerfile: Dockerfile
+    image: oru-tasks-hub:dev
+    container_name: oru-tasks-hub
+    env_file: ./secrets/tasks-hub.env
+    volumes:
+      - ./state:/opt/state
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything:/opt/data/personal-agent/everything:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/pfm:/opt/data/personal-agent/pfm:ro
+    ports:
+      - "127.0.0.1:8004:8004"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8004/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
