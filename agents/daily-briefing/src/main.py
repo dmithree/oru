@@ -93,9 +93,59 @@ async def run_evening(notify: bool = True) -> dict:
     return {"ok": True, "evening": result}
 
 
+TASKS_HUB_URL = __import__("os").environ.get("TASKS_HUB_URL", "http://oru-tasks-hub:8004")
+
+
+def _forward_to_tasks_hub(user_text: str) -> dict | None:
+    """Send the debrief to tasks-hub for LLM-driven event ingestion
+    (idea 14). Returns the upstream report dict, or None on failure
+    so the caller can fall back to the local parser."""
+    import urllib.error
+    import urllib.request
+    body = json.dumps({"user_text": user_text}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        TASKS_HUB_URL.rstrip("/") + "/debrief/ingest",
+        method="POST",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        logger.warning("tasks-hub /debrief/ingest unreachable (%s); falling back", e)
+        return None
+    except Exception:
+        logger.exception("tasks-hub /debrief/ingest call failed")
+        return None
+
+
 @app.post("/save-debrief")
 async def save_debrief(user_text: str = Body(..., embed=True)) -> dict:
     logger.info("Saving debrief response (%d chars)", len(user_text))
+
+    # Phase 2.5b: prefer tasks-hub event ingestion so the debrief
+    # actually mutates the store (closes/defers/blocks/creates tasks)
+    # instead of just writing a parsed JSON file no consumer reads.
+    upstream = await asyncio.to_thread(_forward_to_tasks_hub, user_text)
+    if upstream and upstream.get("ok"):
+        if PENDING_DEBRIEF_FILE.exists():
+            PENDING_DEBRIEF_FILE.unlink()
+        applied = upstream.get("applied") or []
+        summary = upstream.get("summary") or {}
+        if settings.telegram_chat_id:
+            done = sum(1 for a in applied if a.get("kind") == "completed")
+            deferred = sum(1 for a in applied if a.get("kind") == "deferred")
+            blocked = sum(1 for a in applied if a.get("kind") == "blocked")
+            created = sum(1 for a in applied if a.get("kind") == "created")
+            send(
+                "Debrief обработан. "
+                f"Закрыто {done}, перенесено {deferred}, заблокировано {blocked}, новых {created}."
+            )
+        return {"ok": True, "via": "tasks-hub", "summary": summary, "applied": applied}
+
+    # Fallback: local parser writes a JSON file. Kept for resilience
+    # if tasks-hub is down — but the store stays unchanged.
     parsed = await asyncio.to_thread(parse_evening_debrief, user_text)
     p = Path(settings.state_file).parent / "daily-briefing-evening.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -103,8 +153,8 @@ async def save_debrief(user_text: str = Body(..., embed=True)) -> dict:
     if PENDING_DEBRIEF_FILE.exists():
         PENDING_DEBRIEF_FILE.unlink()
     if settings.telegram_chat_id:
-        send("Debrief сохранён.")
-    return {"ok": True, "parsed": parsed["parsed"]}
+        send("Debrief сохранён (tasks-hub недоступен, store не обновлён).")
+    return {"ok": True, "via": "fallback", "parsed": parsed["parsed"]}
 
 
 def do_morning(notify: bool = True) -> dict:
