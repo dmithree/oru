@@ -67,3 +67,15 @@ sections:
     order: [-updated_at]
     limit: 5
     optional: true
+
+  # Fallback for stores whose tasks don't yet carry cog_type / due_at —
+  # surfaces recently-updated open tasks so the brief never goes blank.
+  # When users write tasks with `cog:deep` / `~2h` / `— due ...` the
+  # specific 3-3-3 sections above cover them; this one fills the gap.
+  - id: recent_open
+    title: "Открытые задачи (недавние)"
+    where:
+      status: [open, next]
+    order: [-updated_at]
+    limit: 10
+    optional: true
