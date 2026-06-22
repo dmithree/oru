@@ -63,6 +63,10 @@ TOOL_SCHEMA = {
                         "context_tags": {"type": "array", "items": {"type": "string"}},
                         "priority": {"type": "string", "description": "P0..P3"},
                         "due_at": {"type": "string", "description": "ISO YYYY-MM-DD"},
+                        "recurrence": {
+                            "type": "string",
+                            "description": "every:Nd|w|m|y or every:weekday. Omit for one-off (e.g., 'позвонить бабушке' is one-off; '3 раза за неделю замечать X' is every:1w).",
+                        },
                     },
                     "required": ["text"],
                 },
@@ -205,26 +209,32 @@ def call_llm(transcripts: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
 
 
 def emit_homework(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """For each homework item, upsert into tasks-hub. ext_id is a hash
-    of the text so the same homework appearing in two weekly runs
-    doesn't duplicate."""
+    """For each homework item, emit into tasks-hub. ext_id is a stable
+    hash of the text so re-runs dedup. Recurrence is LLM-decided —
+    "позвонить бабушке" is one-off, "3 раза за неделю замечать X" is
+    every:1w. Without recurrence, completed tasks don't auto-respawn."""
     out: list[dict[str, Any]] = []
     for h in items or []:
         text = (h.get("text") or "").strip()
         if not text:
             continue
         ext_id = "selfref:" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+        kwargs: dict[str, Any] = {
+            "owner_agent": "self-reflection",
+            "ext_id": ext_id,
+            "context_tags": h.get("context_tags"),
+            "priority": h.get("priority"),
+            "due_at": h.get("due_at"),
+        }
+        recurrence = h.get("recurrence")
+        if recurrence:
+            kwargs["recurrence"] = recurrence
         try:
-            task = tasks_hub_client.upsert_recurring(
-                text,
-                owner_agent="self-reflection",
-                recurrence="every:1w",
-                ext_id=ext_id,
-                context_tags=h.get("context_tags"),
-                priority=h.get("priority"),
-                due_at=h.get("due_at"),
-            )
-            out.append({"ok": True, "ext_id": ext_id, "task_id": task.get("id"), "text": text})
+            task = tasks_hub_client.emit_task(text, **{k: v for k, v in kwargs.items() if v is not None})
+            out.append({
+                "ok": True, "ext_id": ext_id, "task_id": task.get("id"),
+                "text": text, "recurrence": recurrence,
+            })
         except tasks_hub_client.TasksHubError as e:
             out.append({"ok": False, "ext_id": ext_id, "text": text, "error": str(e)})
         except Exception as e:  # noqa: BLE001
