@@ -28,6 +28,14 @@ TRANSCRIPT_DIRS = [
 def _morning_prompt(data: dict[str, Any]) -> str:
     today = date.today()
     weekday_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"][today.weekday()]
+    sections_block = data.get("tasks_hub_sections_markdown") or ""
+    context_signal = data.get("tasks_hub_context_applied") or {}
+    signal_line = ""
+    if context_signal.get("health_state") == "recovery_needed":
+        signal_line = "\nВажный сигнал: today is a recovery day — план задач уже урезан вдвое, в брифе подсветить."
+    if context_signal.get("traveling_to"):
+        signal_line += f"\nВажный сигнал: traveling to {context_signal['traveling_to']} — упомянуть в первой строке."
+
     return f"""Ты Oru, личный AI-ассистент Димы. Сформируй утренний бриф на {weekday_ru} {today.day}.{today.month}.{today.year}.
 
 Жёсткие правила:
@@ -40,15 +48,17 @@ def _morning_prompt(data: dict[str, Any]) -> str:
 
 Состояние тела: одна строка с Oura — sleep, readiness, HRV. Если recovery_needed — пометь.
 Вчера: одна строка с Strava (если активность была).
-События дня (Apple Reminders с due=сегодня): bullet list.
-Просрочено: bullet list (Reminders overdue + Linear stuck).
-Открытые задачи: top-5 из tasks rollup.
-Carry-over: одна строка если есть в personal_context.briefing.carry_over.
 Темы недели (из therapy/coaching транскриптов за 24h): 1-2 строки если есть.
-3-3-3 plan: предложи 3 deep, 3 short, 3 AI-задачи на сегодня — из открытых задач и просроченного. Если задач мало — меньше.
 
-Данные:
-{json.dumps(data, ensure_ascii=False, indent=2)}
+Задачи (готовый блок ниже, от tasks-hub) — вставь его VERBATIM, не перефразируй,
+не переформатируй маркдаун, не убирай заголовки секций (carry_over, overdue,
+today_due, plan_333_deep/short/admin, waiting, recent_open):
+
+{sections_block or "(tasks-hub недоступен — пропусти этот блок)"}
+{signal_line}
+
+Данные (для секций состояния тела / Strava / транскриптов):
+{json.dumps({k: v for k, v in data.items() if k not in {"tasks_hub_sections_markdown", "tasks_hub_context_applied", "tasks_hub_sections"}}, ensure_ascii=False, indent=2)}
 
 Бриф:"""
 
@@ -72,10 +82,89 @@ Debrief Димы:
 JSON:"""
 
 
+def _render_tasks_hub_sections(view: dict[str, Any]) -> str:
+    """Render the structured tasks-hub view as a markdown block the LLM
+    pastes verbatim. We do the layout here so the prompt doesn't have
+    to reason about empty sections — they just don't appear."""
+    sections = view.get("sections") or []
+    if not sections:
+        return ""
+    lines: list[str] = []
+    for s in sections:
+        tasks_list = s.get("tasks") or []
+        if not tasks_list:
+            continue
+        lines.append(f"## {s.get('title', s.get('id', ''))}")
+        lines.append("")
+        for t in tasks_list:
+            text = t.get("text", "")
+            decorations: list[str] = []
+            due = t.get("due_at")
+            if due:
+                try:
+                    y, m, d = due.split("-")
+                    yy = date.today().year
+                    decorations.append(f"({d}.{m})" if int(y) == yy else f"({d}.{m}.{y})")
+                except ValueError:
+                    decorations.append(f"({due})")
+            tags = t.get("context_tags") or []
+            if tags:
+                decorations.append(" ".join(tags))
+            eff = t.get("effort_min")
+            if eff is not None:
+                if eff >= 90:
+                    decorations.append("~deep")
+                elif eff >= 60 and eff % 60 == 0:
+                    decorations.append(f"~{eff // 60}h")
+                else:
+                    decorations.append(f"~{eff}m")
+            pri = t.get("priority")
+            if pri:
+                decorations.append(f"!{pri}")
+            suffix = " " + " ".join(decorations) if decorations else ""
+            lines.append(f"- {text}{suffix}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _derive_plan_333_from_view(view: dict[str, Any]) -> dict[str, list[str]]:
+    """Pull plan_333 directly from structured view sections instead of
+    re-regex'ing it back out of the LLM summary."""
+    plan = {"deep": [], "short": [], "ai": []}
+    section_map = {
+        "plan_333_deep":  "deep",
+        "plan_333_short": "short",
+        "plan_333_admin": "short",   # admin stacks with short for the legacy 3-3-3 shape
+        "plan_333_ai":    "ai",
+    }
+    for s in view.get("sections", []):
+        key = section_map.get(s.get("id"))
+        if not key:
+            continue
+        for t in s.get("tasks", []):
+            txt = t.get("text", "").strip()
+            if txt and txt not in plan[key]:
+                plan[key].append(txt)
+    return plan
+
+
 def build_morning_brief() -> dict[str, Any]:
     oura_data = oura.fetch_today()
     strava_data = strava.fetch_yesterday()
-    open_tasks = tasks.read_open_tasks(limit=30)
+
+    # Phase 3 brief refactor: pull the structured morning view from
+    # tasks-hub instead of fetching a flat task list. Render the sections
+    # to markdown here and feed both the markdown block and the raw view
+    # to the LLM, so the prompt can paste sections verbatim AND derive
+    # plan_333 without regex.
+    hub_view = tasks.fetch_brief_sections() or {}
+    sections_md = _render_tasks_hub_sections(hub_view)
+    context_applied = hub_view.get("context_applied") or {}
+
+    # Legacy flat list kept as a fallback when tasks-hub is down; analyzer
+    # falls back to the markdown file the brief used pre-Phase-2.5.
+    open_tasks = tasks.read_open_tasks(limit=30) if not sections_md else []
+
     linear_stuck = linear.fetch_stuck()
     reminders_data = reminders.fetch_today_reminders()
     recent_transcripts = transcripts.fetch_recent_transcripts(TRANSCRIPT_DIRS)
@@ -94,21 +183,30 @@ def build_morning_brief() -> dict[str, Any]:
             "travel": context.get("travel", {}),
             "briefing": context.get("briefing", {}),
         },
+        # Hand-off to the LLM prompt — verbatim block + context signal.
+        "tasks_hub_sections_markdown": sections_md,
+        "tasks_hub_context_applied": context_applied,
+        "tasks_hub_sections": hub_view.get("sections"),
     }
 
     summary = "(LLM не настроен)"
-    plan: dict[str, list[str]] = {"deep": [], "short": [], "ai": []}
+    # Prefer pulling plan_333 from the structured view directly.
+    plan = _derive_plan_333_from_view(hub_view) if hub_view else {"deep": [], "short": [], "ai": []}
+
     if settings.anthropic_api_key:
         try:
             resp = completion(
                 model=f"anthropic/{settings.anthropic_model}",
                 messages=[{"role": "user", "content": _morning_prompt(raw)}],
-                max_tokens=900,
+                max_tokens=1100,
                 temperature=0.3,
                 api_key=settings.anthropic_api_key,
             )
             summary = resp.choices[0].message.content.strip()
-            plan = _extract_333(summary)
+            # If hub_view was empty, fall back to the regex extractor
+            # so plan_333 still gets populated from the LLM output.
+            if not any(plan.values()):
+                plan = _extract_333(summary)
         except Exception:
             logger.exception("Morning LLM failed")
             summary = "(LLM ошибка; см. логи)"
