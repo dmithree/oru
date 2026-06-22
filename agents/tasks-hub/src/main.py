@@ -22,10 +22,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import backpressure as bp, coordinator, debrief as debrief_module, events, reminders_commands, store
+from . import backpressure as bp, coordinator, debrief as debrief_module, events, reminders_commands, store, telegram
 from .config import settings
 from .ingestor import runner as ingest_runner
 from .ingestor.linear_adapter import LinearAdapter
@@ -498,10 +500,91 @@ async def ingest(body: IngestRequest) -> dict:
 
 # === Entry ===========================================================
 
+# === Scheduled jobs ==================================================
+
+
+def _scheduled_ingest(sources: list[str], dry_run: bool = False) -> None:
+    """Background ingest run. Logs the totals; never raises."""
+    try:
+        adapters: list = []
+        if "markdown" in sources:
+            adapters.append(MarkdownAdapter(repo_root=detect_repo_root()))
+        if "reminders" in sources:
+            adapters.append(RemindersAdapter(file_path=Path("/opt/state/reminders.json")))
+        if "linear" in sources:
+            adapters.append(LinearAdapter())
+        if "thoughts" in sources:
+            adapters.append(ThoughtsAdapter(queue_path=Path("/opt/state/thoughts-queue.jsonl")))
+        report = ingest_runner.run_adapters(adapters, dry_run=dry_run, agent="cron")
+        d = report.as_dict()
+        logger.info("cron-ingest sources=%s totals=%s", sources, d.get("totals"))
+        if d.get("errors"):
+            logger.warning("cron-ingest errors: %s", d["errors"][:3])
+    except Exception:
+        logger.exception("cron-ingest crashed")
+
+
+def _scheduled_cleanup() -> None:
+    """Sunday backpressure: find stale tasks, summarise to Telegram so
+    Дима can run /cleanup to triage them."""
+    try:
+        stale = bp.find_stale(older_than_days=settings.cleanup_stale_days, limit=20)
+        summary = bp.summary(older_than_days=settings.cleanup_stale_days)
+        if not stale:
+            logger.info("cron-cleanup: nothing stale, skipping telegram")
+            return
+        lines = [
+            f"_Воскресный cleanup_ — {len(stale)} заглохших задач",
+            "",
+            f"Buckets: 30-60d={summary.get('30-60d', 0)}, "
+            f"60-90d={summary.get('60-90d', 0)}, "
+            f"90d+={summary.get('90d+', 0)}",
+            "",
+            "Для триажа: `/cleanup`. Можно ответить одним сообщением",
+            "вида `1 drop, 2 defer 14d, 3 keep`.",
+        ]
+        telegram.send("\n".join(lines))
+        logger.info("cron-cleanup: surfaced %d stale tasks to telegram", len(stale))
+    except Exception:
+        logger.exception("cron-cleanup crashed")
+
+
+def _parse_cron(expr: str) -> CronTrigger:
+    parts = expr.split()
+    if len(parts) != 5:
+        raise ValueError(f"cron must be 5 fields, got: {expr!r}")
+    m, h, d, mo, dw = parts
+    return CronTrigger(minute=m, hour=h, day=d, month=mo, day_of_week=dw)
+
+
 async def main() -> None:
     store.init_db()
     logger.info("tasks-hub starting (port %d, db=%s, events=%s)",
                 settings.http_port, settings.db_file, settings.events_file)
+
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        lambda: asyncio.create_task(asyncio.to_thread(_scheduled_ingest, ["reminders"], False)),
+        _parse_cron(settings.ingest_reminders_cron),
+        id="ingest-reminders",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(asyncio.to_thread(_scheduled_ingest, ["markdown", "linear", "thoughts"], False)),
+        _parse_cron(settings.ingest_other_cron),
+        id="ingest-other",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(asyncio.to_thread(_scheduled_cleanup)),
+        _parse_cron(settings.cleanup_cron),
+        id="cleanup-weekly",
+        replace_existing=True,
+    )
+    scheduler.start()
+    logger.info("scheduler started: reminders=%s, other=%s, cleanup=%s",
+                settings.ingest_reminders_cron, settings.ingest_other_cron, settings.cleanup_cron)
+
     config = uvicorn.Config(app, host=settings.http_host, port=settings.http_port, log_config=None)
     server = uvicorn.Server(config)
     await server.serve()

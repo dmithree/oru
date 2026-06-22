@@ -42,18 +42,27 @@ def _normalize_due(due: Optional[str]) -> tuple[Optional[str], Optional[str]]:
         return None, None
 
 
+def _default_list_tags() -> dict[str, str]:
+    """Read list→tag mapping from REMINDERS_LIST_TAGS_JSON env. Empty
+    dict if unset/invalid — auto-tagging then off. Users opt in by
+    setting e.g. '{"PFM": "@work", "Goods": "@shopping"}' in secrets."""
+    import json as _json
+    from ..config import settings as _s
+    raw = (_s.reminders_list_tags_json or "").strip()
+    if not raw:
+        return {}
+    try:
+        d = _json.loads(raw)
+        return {str(k): str(v) for k, v in d.items() if isinstance(v, str)}
+    except Exception:
+        return {}
+
+
 @dataclass
 class RemindersAdapter:
     name: str = "reminders"
     file_path: Path = field(default_factory=lambda: Path("/opt/state/reminders.json"))
-    list_to_context: dict[str, str] = field(default_factory=lambda: {
-        # Map Reminders.app list names to default context tags. Adjust per user.
-        "AI": "@ai",
-        "Покупки": "@shopping",
-        "Звонки": "@phone",
-        "Дом": "@home",
-        "Inbox": "@inbox",
-    })
+    list_to_context: dict[str, str] = field(default_factory=_default_list_tags)
     # Pull-direction (idea 5 completion): when a previously-ingested
     # ext_id is missing from the new snapshot AND the store still has
     # it open, the user must have completed/deleted the reminder in
