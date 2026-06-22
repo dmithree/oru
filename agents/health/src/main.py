@@ -30,6 +30,7 @@ from .workouts import (
     format_session,
     load_program,
 )
+from . import tasks_hub_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,7 +136,46 @@ def run_weekly_digest(notify: bool = True) -> dict:
         logger.info("Digest done. state=%s telegram=%s", digest.get("state"), sent)
     else:
         logger.info("Digest done. state=%s (telegram skipped)", digest.get("state"))
+    # Emit/refresh the recurring "quarterly bloodwork" follow-up task in
+    # tasks-hub. upsert_recurring is idempotent on ext_id so weekly digest
+    # runs won't accumulate duplicates; only the FIRST run creates it,
+    # subsequent runs are no-ops. When Дима closes the task in store the
+    # store's recurrence machinery spawns the next instance with due_at
+    # = today + 3m.
+    _emit_health_followups()
     return digest
+
+
+def _emit_health_followups() -> None:
+    """Ensure the standing health follow-up tasks exist in tasks-hub.
+
+    For now: one recurring task — quarterly bloodwork. Add more by
+    extending the list. Failures are logged but not raised; the digest
+    must not depend on tasks-hub being up."""
+    followups = [
+        {
+            "ext_id": "health:bloodwork-quarterly",
+            "text": "Сдать анализы крови",
+            "recurrence": "every:3m",
+            "context_tags": ["@phone", "@health"],
+            "priority": "P2",
+        },
+    ]
+    for f in followups:
+        try:
+            tasks_hub_client.upsert_recurring(
+                f["text"],
+                owner_agent="health",
+                recurrence=f["recurrence"],
+                ext_id=f["ext_id"],
+                context_tags=f.get("context_tags"),
+                priority=f.get("priority"),
+            )
+            logger.info("health: ensured recurring task %s", f["ext_id"])
+        except tasks_hub_client.TasksHubError as e:
+            logger.warning("health: tasks-hub unreachable, skipping %s: %s", f["ext_id"], e)
+        except Exception:
+            logger.exception("health: emit failed for %s", f["ext_id"])
 
 
 # --- Workout reminders (resistance bands) -------------------------------------
