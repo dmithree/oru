@@ -81,6 +81,20 @@ class RemindersAdapter:
             self._last_snapshot_ext_ids = None  # type: ignore[assignment]
             return
 
+        # Partial snapshot: some lists failed (per-list try/catch in
+        # the bridge). Ingest what we have but signal to the runner
+        # that pull-sync (closing disappeared ext_ids) is NOT safe —
+        # the missing reminders might be in a list we never read.
+        partial = data.get("partial_lists") or []
+        if partial:
+            logger.info(
+                "reminders adapter: %d list(s) failed in snapshot — pull-sync disabled this round",
+                len(partial),
+            )
+            self._snapshot_is_partial = True
+        else:
+            self._snapshot_is_partial = False
+
         for r in data.get("reminders", []):
             name = (r.get("name") or "").strip()
             if not name:
@@ -123,10 +137,15 @@ class RemindersAdapter:
         """Return ext_ids that were in the store last time as open but
         are NOT in the latest snapshot. Caller closes them.
 
-        Returns empty set if the snapshot was an error one (signal:
-        adapter sets self._last_snapshot_ext_ids = None) so we never
-        close tasks because of an AppleEvent timeout."""
+        Returns empty set when the snapshot is untrusted:
+          * full error snapshot (self._last_snapshot_ext_ids = None)
+          * partial snapshot — at least one list timed out in the bridge,
+            so missing reminders might be in an unread list rather than
+            user-completed (self._snapshot_is_partial = True).
+        """
         if self._last_snapshot_ext_ids is None:
+            return set()
+        if getattr(self, "_snapshot_is_partial", False):
             return set()
         return known_open_ext_ids - self._last_snapshot_ext_ids
 
