@@ -87,11 +87,15 @@ def _parse_cron(expr: str) -> CronTrigger:
     return CronTrigger(minute=m, hour=h, day=d, month=mo, day_of_week=dw)
 
 
+async def _scheduled_job() -> None:
+    await asyncio.to_thread(_scheduled_run)
+
+
 async def main() -> None:
     logger.info("self-reflection starting (port %d)", settings.http_port)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(_scheduled_run)),
+        _scheduled_job,
         _parse_cron(settings.analyze_cron),
         id="self-reflection",
         replace_existing=True,

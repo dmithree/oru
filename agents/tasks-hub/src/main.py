@@ -27,7 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import backpressure as bp, coordinator, debrief as debrief_module, events, reminders_commands, store, telegram
+from . import backpressure as bp, coordinator, debrief as debrief_module, events, health_aggregator, reminders_commands, store, telegram
 from .config import settings
 from .ingestor import runner as ingest_runner
 from .ingestor.linear_adapter import LinearAdapter
@@ -120,6 +120,19 @@ class BulkTriage(BaseModel):
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True, "agent": "tasks-hub", "schema_version": store.SCHEMA_VERSION}
+
+
+@app.get("/status/all")
+def status_all() -> dict:
+    """Aggregated status across all 5 oru containers + 3 host watchers.
+
+    Designed for skills and the future hermes orchestrator: one HTTP
+    call returns a single dict with per-container /healthz results plus
+    host-watcher staleness (reminders-bridge, reminders-commands-watcher,
+    living-markdown-sync). `issues` is a flat list of human-readable
+    problems — empty array means everything healthy.
+    """
+    return health_aggregator.aggregate()
 
 
 @app.get("/stats")
@@ -557,6 +570,18 @@ def _parse_cron(expr: str) -> CronTrigger:
     return CronTrigger(minute=m, hour=h, day=d, month=mo, day_of_week=dw)
 
 
+async def _ingest_reminders_job() -> None:
+    await asyncio.to_thread(_scheduled_ingest, ["reminders"], False)
+
+
+async def _ingest_other_job() -> None:
+    await asyncio.to_thread(_scheduled_ingest, ["markdown", "linear", "thoughts"], False)
+
+
+async def _cleanup_job() -> None:
+    await asyncio.to_thread(_scheduled_cleanup)
+
+
 async def main() -> None:
     store.init_db()
     logger.info("tasks-hub starting (port %d, db=%s, events=%s)",
@@ -564,19 +589,19 @@ async def main() -> None:
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(_scheduled_ingest, ["reminders"], False)),
+        _ingest_reminders_job,
         _parse_cron(settings.ingest_reminders_cron),
         id="ingest-reminders",
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(_scheduled_ingest, ["markdown", "linear", "thoughts"], False)),
+        _ingest_other_job,
         _parse_cron(settings.ingest_other_cron),
         id="ingest-other",
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(_scheduled_cleanup)),
+        _cleanup_job,
         _parse_cron(settings.cleanup_cron),
         id="cleanup-weekly",
         replace_existing=True,

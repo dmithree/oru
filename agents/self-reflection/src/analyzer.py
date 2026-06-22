@@ -67,6 +67,16 @@ TOOL_SCHEMA = {
                             "type": "string",
                             "description": "every:Nd|w|m|y or every:weekday. Omit for one-off (e.g., 'позвонить бабушке' is one-off; '3 раза за неделю замечать X' is every:1w).",
                         },
+                        "matches_existing_ext_id": {
+                            "type": "string",
+                            "description": (
+                                "If this homework item is semantically the SAME as one of the "
+                                "existing open homework items shown in the user message (e.g., "
+                                "a rephrase of the same intent), set this to that item's ext_id. "
+                                "When set, the agent skips creating a duplicate. Leave empty for "
+                                "genuinely new homework."
+                            ),
+                        },
                     },
                     "required": ["text"],
                 },
@@ -88,12 +98,20 @@ TOOL_SCHEMA = {
 _SYSTEM = (
     "Ты IFS-аналитик Димы. Получаешь несколько последних саммари его "
     "терапевтических и коучинговых сессий и возвращаешь structured findings "
-    "через tool call: активные части, темы, конкретные домашки, carry-over. "
-    "Жёсткие правила: никаких эмодзи; части — короткие русские лейблы "
-    "(Достигатор, Защитник, Контролёр и т.п.); homework.text должен быть "
-    "конкретным, не общим ('Заметить momentum Достигатора 3 раза за неделю', "
-    "не 'работать над собой'); если в данных нет ничего нового — возврати "
-    "пустые массивы, не выдумывай."
+    "через tool call: активные части, темы, конкретные домашки, carry-over.\n\n"
+    "Жёсткие правила:\n"
+    "- никаких эмодзи;\n"
+    "- части — короткие русские лейблы (Достигатор, Защитник, Контролёр и т.п.);\n"
+    "- homework.text должен быть конкретным, не общим ('Заметить momentum "
+    "Достигатора 3 раза за неделю', не 'работать над собой');\n"
+    "- если в данных нет ничего нового — возврати пустые массивы, не выдумывай.\n\n"
+    "DEDUP: если в user message есть блок 'EXISTING_HOMEWORK', он содержит "
+    "уже открытые домашки с их ext_id. Когда новая домашка из транскрипта "
+    "СЕМАНТИЧЕСКИ совпадает с существующей (пусть даже переформулирована — "
+    "'замечать момент' vs 'отслеживать момент' vs 'ловить момент') — "
+    "ОБЯЗАТЕЛЬНО заполни поле matches_existing_ext_id значением её ext_id "
+    "и используй текст ИЗ существующей записи (не свою новую формулировку). "
+    "Это предотвращает дубли в store при перефразировании между сессиями."
 )
 
 
@@ -168,6 +186,28 @@ def collect_new_transcripts(
     return out
 
 
+def _fetch_existing_homework_ledger() -> list[dict[str, Any]]:
+    """Pull currently-open self-reflection tasks from tasks-hub. Used
+    as LLM context for semantic dedup. Failures are non-fatal — we
+    just skip the dedup pass."""
+    try:
+        return tasks_hub_client.list_open_tasks("self-reflection")
+    except Exception:  # noqa: BLE001
+        logger.exception("could not fetch existing homework ledger")
+        return []
+
+
+def _format_ledger(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    lines = ["EXISTING_HOMEWORK (ext_id :: text):"]
+    for r in rows:
+        ext_id = r.get("ext_id") or r.get("id") or "?"
+        text = (r.get("text") or "").strip().replace("\n", " ")
+        lines.append(f"- {ext_id} :: {text}")
+    return "\n".join(lines)
+
+
 def call_llm(transcripts: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if not (settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")):
         logger.warning("self-reflection: ANTHROPIC_API_KEY not set; skipping")
@@ -179,10 +219,12 @@ def call_llm(transcripts: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
         f"### {t['kind']} :: {t['rel']}\n\n{t['content']}"
         for t in transcripts
     )
-    user = (
-        "Свежие саммари ({n} файлов) ниже. Извлеки структуру через tool call.\n\n"
-        "{b}"
-    ).format(n=len(transcripts), b=block)
+    ledger = _format_ledger(_fetch_existing_homework_ledger())
+    user_parts = [f"Свежие саммари ({len(transcripts)} файлов) ниже. Извлеки структуру через tool call."]
+    if ledger:
+        user_parts.append(ledger)
+    user_parts.append(block)
+    user = "\n\n".join(user_parts)
 
     api_key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
     resp = litellm.completion(
@@ -212,12 +254,38 @@ def emit_homework(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """For each homework item, emit into tasks-hub. ext_id is a stable
     hash of the text so re-runs dedup. Recurrence is LLM-decided —
     "позвонить бабушке" is one-off, "3 раза за неделю замечать X" is
-    every:1w. Without recurrence, completed tasks don't auto-respawn."""
+    every:1w. Without recurrence, completed tasks don't auto-respawn.
+
+    Semantic dedup: if the LLM populated `matches_existing_ext_id` we
+    skip the emit (the open task in store covers this homework already)
+    and record a `matched=True` entry in the result. We validate the
+    claimed ext_id against the current ledger so the LLM can't make up
+    a non-existent id."""
     out: list[dict[str, Any]] = []
+    # Snapshot the ledger once so we can validate match claims without
+    # racing the LLM's view of the store.
+    existing_ext_ids: set[str] = set()
+    try:
+        for t in tasks_hub_client.list_open_tasks("self-reflection"):
+            ext = t.get("ext_id")
+            if ext:
+                existing_ext_ids.add(ext)
+    except Exception:  # noqa: BLE001
+        logger.exception("emit_homework: ledger snapshot failed; proceeding without validation")
+
     for h in items or []:
         text = (h.get("text") or "").strip()
         if not text:
             continue
+        match_claim = (h.get("matches_existing_ext_id") or "").strip() or None
+        if match_claim and match_claim in existing_ext_ids:
+            out.append({
+                "ok": True, "matched": True, "ext_id": match_claim,
+                "text": text, "recurrence": h.get("recurrence"),
+            })
+            continue
+        if match_claim:
+            logger.warning("LLM claimed match against unknown ext_id=%s; emitting as new", match_claim)
         ext_id = "selfref:" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
         kwargs: dict[str, Any] = {
             "owner_agent": "self-reflection",
@@ -232,7 +300,7 @@ def emit_homework(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:
             task = tasks_hub_client.emit_task(text, **{k: v for k, v in kwargs.items() if v is not None})
             out.append({
-                "ok": True, "ext_id": ext_id, "task_id": task.get("id"),
+                "ok": True, "matched": False, "ext_id": ext_id, "task_id": task.get("id"),
                 "text": text, "recurrence": recurrence,
             })
         except tasks_hub_client.TasksHubError as e:

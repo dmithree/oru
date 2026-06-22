@@ -186,17 +186,19 @@ def _parse_cron(expr: str) -> CronTrigger:
     return CronTrigger(minute=m, hour=h, day=d, month=mo, day_of_week=dw)
 
 
+async def _morning_job() -> None:
+    await asyncio.to_thread(do_morning, True)
+
+
+async def _evening_job() -> None:
+    await asyncio.to_thread(do_evening_prompt, True)
+
+
 async def main() -> None:
     logger.info("Starting daily-briefing (morning=%s, evening=%s)", settings.morning_cron, settings.evening_cron)
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(do_morning, True)),
-        _parse_cron(settings.morning_cron), id="morning",
-    )
-    scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(do_evening_prompt, True)),
-        _parse_cron(settings.evening_cron), id="evening",
-    )
+    scheduler.add_job(_morning_job, _parse_cron(settings.morning_cron), id="morning")
+    scheduler.add_job(_evening_job, _parse_cron(settings.evening_cron), id="evening")
     scheduler.start()
     config = uvicorn.Config(app, host=settings.http_host, port=settings.http_port, log_config=None)
     server = uvicorn.Server(config)

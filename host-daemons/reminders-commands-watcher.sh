@@ -68,6 +68,36 @@ Reminders.includeStandardAdditions = true;
 const cmd = $cmd_json;
 const out = {cmd_id: cmd.cmd_id || null, action: cmd.action, ok: false};
 
+// Mutations via array-index specifier (rems[j].completed = true) silently
+// no-op in JXA. The only reliable write is through the byName-style
+// chained specifier: Reminders.lists.byName(L).reminders.byName(N).prop = v.
+// We read names from a bulk-fetched array to avoid per-reminder
+// AppleEvents (the slow path), then write via byName specifiers.
+function collectMatchNames(listName, targetName) {
+  const lists = Reminders.lists();
+  const matches = [];
+  for (let i = 0; i < lists.length; i++) {
+    if (listName && lists[i].name() !== listName) continue;
+    const list = lists[i];
+    // .reminders.whose(...) returns a specifier; calling .name() on it
+    // bulk-fetches all matching names in a single AppleEvent. Adding
+    // an extra () would materialize specifier objects, and .name() on
+    // a JS array is invalid. Keep this exact shape.
+    const remsSpec = list.reminders.whose({completed: false});
+    const names = remsSpec.name();
+    for (let j = 0; j < names.length; j++) {
+      if (names[j] === targetName) {
+        matches.push({list: list.name(), name: names[j]});
+      }
+    }
+  }
+  return matches;
+}
+
+function setProp(listName, remName, prop, value) {
+  Reminders.lists.byName(listName).reminders.byName(remName)[prop] = value;
+}
+
 try {
   if (cmd.action === "create") {
     const listName = cmd.list || "AI";
@@ -87,57 +117,42 @@ try {
     out.ok = true;
     out.created_name = cmd.name;
     out.list = listName;
-  } else if (cmd.action === "complete_by_match") {
+  } else if (cmd.action === "complete_by_match" || cmd.action === "complete") {
     const listName = cmd.list || "";
     const name = cmd.name || "";
-    let matched = 0;
-    const lists = Reminders.lists();
-    for (let i = 0; i < lists.length; i++) {
-      if (listName && lists[i].name() !== listName) continue;
-      const rems = lists[i].reminders.whose({completed: false})();
-      for (let j = 0; j < rems.length; j++) {
-        if (rems[j].name() === name) {
-          rems[j].completed = true;
-          matched++;
-        }
-      }
-    }
-    out.ok = matched > 0;
-    out.matched = matched;
-  } else if (cmd.action === "complete") {
-    // Without an ext_id matcher on the host side, fall back to
-    // (name,list) embedded in payload. If absent, mark unsupported.
-    if (cmd.name && cmd.list) {
-      const lists = Reminders.lists();
+    if (cmd.action === "complete" && !(name && listName)) {
+      out.ok = false;
+      out.error = "complete requires name+list (or use complete_by_match)";
+    } else if (!name) {
+      out.ok = false;
+      out.error = "match requires name";
+    } else {
+      const targets = collectMatchNames(listName, name);
       let matched = 0;
-      for (let i = 0; i < lists.length; i++) {
-        if (lists[i].name() !== cmd.list) continue;
-        const rems = lists[i].reminders.whose({completed: false})();
-        for (let j = 0; j < rems.length; j++) {
-          if (rems[j].name() === cmd.name) {
-            rems[j].completed = true;
-            matched++;
-          }
+      for (let k = 0; k < targets.length; k++) {
+        try {
+          setProp(targets[k].list, targets[k].name, "completed", true);
+          matched++;
+        } catch (e) {
+          // byName resolves to the first match; if there are dups we
+          // can only mark the first one. Skip subsequent dup attempts.
+          break;
         }
       }
       out.ok = matched > 0;
       out.matched = matched;
-    } else {
-      out.ok = false;
-      out.error = "complete requires name+list (or use complete_by_match)";
+      out.candidates = targets.length;
     }
   } else if (cmd.action === "snooze") {
     if (cmd.name && cmd.list && cmd.until) {
-      const lists = Reminders.lists();
+      const targets = collectMatchNames(cmd.list, cmd.name);
       let touched = 0;
-      for (let i = 0; i < lists.length; i++) {
-        if (lists[i].name() !== cmd.list) continue;
-        const rems = lists[i].reminders.whose({completed: false})();
-        for (let j = 0; j < rems.length; j++) {
-          if (rems[j].name() === cmd.name) {
-            rems[j].dueDate = new Date(cmd.until);
-            touched++;
-          }
+      for (let k = 0; k < targets.length; k++) {
+        try {
+          setProp(targets[k].list, targets[k].name, "dueDate", new Date(cmd.until));
+          touched++;
+        } catch (e) {
+          break;
         }
       }
       out.ok = touched > 0;

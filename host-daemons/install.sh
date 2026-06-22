@@ -25,6 +25,7 @@ LABELS=(
     com.oru.reminders-bridge
     com.oru.reminders-commands-watcher
     com.oru.living-markdown-sync
+    com.oru.skill-cache-invalidator
 )
 
 uninstall() {
@@ -58,12 +59,14 @@ done
 cp "$REPO_DIR/reminders-bridge.sh"            "$DEST/"
 cp "$REPO_DIR/reminders-commands-watcher.sh"  "$DEST/"
 cp "$REPO_DIR/living-markdown-sync.sh"        "$DEST/"
+cp "$REPO_DIR/skill-cache-invalidator.sh"     "$DEST/"
 chmod +x "$DEST/"*.sh
 
 for entry in \
     "reminders-bridge:900" \
     "reminders-commands-watcher:60" \
-    "living-markdown-sync:3600" ; do
+    "living-markdown-sync:3600" \
+    "skill-cache-invalidator:60" ; do
     label="${entry%%:*}"
     interval="${entry##*:}"
     plist="$AGENTS/com.oru.$label.plist"

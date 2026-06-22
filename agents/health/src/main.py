@@ -241,21 +241,25 @@ def _parse_cron(expr: str) -> CronTrigger:
     return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=dow)
 
 
+async def _weekly_digest_job() -> None:
+    await asyncio.to_thread(run_weekly_digest, True)
+
+
+async def _workout_reminder_job() -> None:
+    await asyncio.to_thread(run_workout_reminder, True)
+
+
 async def main() -> None:
     logger.info("Starting health agent (cron=%s, tz=%s)", settings.digest_cron, os.environ.get("TZ", "system"))
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        lambda: asyncio.create_task(asyncio.to_thread(run_weekly_digest, True)),
-        _parse_cron(settings.digest_cron),
-        id="weekly-digest",
-    )
+    scheduler.add_job(_weekly_digest_job, _parse_cron(settings.digest_cron), id="weekly-digest")
 
     if settings.workout_enabled:
         active = _load_workout_state()["active_program"]
         dow = PROGRAMS[active]["dow"]
         scheduler.add_job(
-            lambda: asyncio.create_task(asyncio.to_thread(run_workout_reminder, True)),
+            _workout_reminder_job,
             CronTrigger(hour=settings.workout_hour, minute=0, day_of_week=dow),
             id="workout-reminder",
         )

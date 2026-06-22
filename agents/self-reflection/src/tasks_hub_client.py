@@ -64,6 +64,47 @@ def _post(path: str, body: dict[str, Any], *, base_url: str = DEFAULT_BASE_URL,
         raise TasksHubError(f"connect failed to {url}: {e}") from None
 
 
+def _get(path: str, *, base_url: str = DEFAULT_BASE_URL,
+         timeout: float = 5.0) -> dict[str, Any]:
+    url = base_url.rstrip("/") + path
+    req = Request(url, method="GET")
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        raise TasksHubError(f"HTTP {e.code} from {url}: {detail}") from None
+    except URLError as e:
+        raise TasksHubError(f"connect failed to {url}: {e}") from None
+
+
+def list_open_tasks(
+    owner_agent: str,
+    *,
+    statuses: Iterable[str] = ("open", "next", "doing", "inbox"),
+    limit: int = 100,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = 5.0,
+) -> list[dict[str, Any]]:
+    """Return open tasks owned by the given agent. Used for LLM-driven
+    semantic dedup: the agent passes this list as context so the model
+    can match a new homework item against an existing one.
+
+    tasks-hub /tasks accepts multi-status via repeated ?status= params,
+    so we send one request per call instead of N round-trips."""
+    from urllib.parse import urlencode
+    params = [("owner_agent", owner_agent), ("limit", str(limit))]
+    for s in statuses:
+        params.append(("status", s))
+    q = urlencode(params)
+    try:
+        resp = _get(f"/tasks?{q}", base_url=base_url, timeout=timeout)
+    except TasksHubError:
+        logger.exception("list_open_tasks failed for owner=%s", owner_agent)
+        return []
+    return list(resp.get("tasks") or resp.get("items") or [])
+
+
 def emit_task(
     text: str,
     *,
