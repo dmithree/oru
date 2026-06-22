@@ -81,3 +81,25 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  self-reflection:
+    build:
+      context: ./agents/self-reflection
+      dockerfile: Dockerfile
+    image: oru-self-reflection:dev
+    container_name: oru-self-reflection
+    env_file: ./secrets/self-reflection.env
+    volumes:
+      - ./state:/opt/state
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/therapy:/opt/data/personal/therapy:ro
+      - /Users/dmitry/Documents/GitHub/personal-agent/everything/personal/coach:/opt/data/personal/coach:ro
+    ports:
+      - "127.0.0.1:8005:8005"
+    restart: unless-stopped
+    depends_on:
+      - tasks-hub
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8005/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
