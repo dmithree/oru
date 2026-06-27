@@ -1,0 +1,37 @@
+{
+  "id": "31bafc8d623c",
+  "name": "Morning briefing (Oru)",
+  "prompt": "Это твоя ежедневная утренняя сводка для Димы. Ниже в Script Output (служебные строки вида \"Generating...\", \"Tasks index updated\", \"WARNING\", \"Daily state saved\" игнорируй) уже собранные на сегодня данные: состояние/готовность, главный проект на 3 часа, три коротких задачи, три задачи по AI и закрывающая строка.\n\nПодай это Диме как утренний briefing своим голосом Oru (см. SOUL.md). Сохрани структуру: приветствие с днём недели, блок Состояние, План на день (Три часа на главный проект / Три коротких задачи / Три задачи по AI), закрывающая строка. Можешь добавить одну короткую личную рамку сверху (1 предложение), но не растекайся. Никаких эмодзи, никакой транслитерации, без trailing summary и follow-up вопросов.\n\nТвой финальный ответ и есть briefing — система сама доставит его Диме. НЕ вызывай send_message и не пытайся доставить сам. Если данных по какой-то причине нет совсем — ответь ровно [SILENT].",
+  "skills": [],
+  "skill": null,
+  "model": null,
+  "provider": null,
+  "base_url": null,
+  "script": "morning_briefing_data.sh",
+  "no_agent": false,
+  "context_from": null,
+  "schedule": {
+    "kind": "cron",
+    "expr": "0 8 * * *",
+    "display": "0 8 * * *"
+  },
+  "schedule_display": "0 8 * * *",
+  "repeat": {
+    "times": null,
+    "completed": 9
+  },
+  "enabled": true,
+  "state": "scheduled",
+  "paused_at": null,
+  "paused_reason": null,
+  "created_at": "2026-06-16T08:33:09.821229+03:00",
+  "next_run_at": "2026-06-26T08:00:00+03:00",
+  "last_run_at": "2026-06-25T08:00:57.018455+03:00",
+  "last_status": "ok",
+  "last_error": null,
+  "last_delivery_error": null,
+  "deliver": "telegram:204197922",
+  "origin": null,
+  "enabled_toolsets": null,
+  "workdir": null
+}

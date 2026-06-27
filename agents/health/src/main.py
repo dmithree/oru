@@ -21,6 +21,8 @@ from fastapi import FastAPI
 from .analyzer import build_digest
 from .config import settings
 from .fetchers import oura, strava
+from . import nudge
+from . import research
 from .telegram import send
 from .workouts import (
     DEFAULT_PROGRAM,
@@ -76,6 +78,58 @@ def fetch_test() -> dict:
         "oura": oura.fetch_week(),
         "strava": strava.fetch_week(),
     }
+
+
+# ---------- Daily nudge (uniform cross-domain contract) ----------
+
+@app.post("/daily-nudge")
+async def daily_nudge(notify: bool = False, mark: bool = True) -> dict:
+    """ONE proactive health question for the morning brief. Uniform contract
+    shared with travel-continuity: returns {topic, topic_label, urgency,
+    question}. mark=true advances the anti-repeat tracker (brief path);
+    mark=false is a read-only peek."""
+    result = await asyncio.to_thread(nudge.build_health_nudge)
+    if mark and result.get("topic") and result.get("question"):
+        nudge.mark_asked(result["topic"], date.today().isoformat())
+    if notify and result.get("question"):
+        send(result["question"])
+    return {"ok": True, "result": result}
+
+
+@app.post("/log-decision")
+async def log_decision(topic: str, note: str) -> dict:
+    """Record a decision Дима made so the nudge engine stops re-surfacing a
+    topic (e.g. 'late calls are a fixed constraint' closes sleep-timing)."""
+    d = nudge.add_decision(topic, note, date.today().isoformat())
+    return {"ok": True, "decisions": d.get("decisions", [])}
+
+
+@app.get("/nudge-state")
+def nudge_state() -> dict:
+    """Debug: anti-repeat tracker + decisions log."""
+    return nudge.get_state()
+
+
+# ---------- Evidence-based research (PubMed) ----------
+
+@app.get("/research")
+async def research_query(q: str, retmax: int = 6) -> dict:
+    """On-demand: search PubMed for Дима's question, return studies with evidence
+    tiers (meta-analysis/systematic review/RCT/...) and links. No threshold."""
+    result = await asyncio.to_thread(research.search, q, retmax)
+    return {"ok": True, "result": result}
+
+
+@app.post("/research-scan")
+async def research_scan(notify: bool = False, since_days: int = 21) -> dict:
+    """Proactive (cron) high-bar scan: ONLY meta-analyses / systematic reviews on
+    Дима's standing topics in the window. Usually empty — speaks only when
+    something significant landed. Returns studies; cron decides whether to voice."""
+    result = await asyncio.to_thread(research.high_quality_recent, None, since_days)
+    if notify and result.get("count"):
+        lines = [f"- {s['tier_label']}: {s['title']} ({s['journal']}) {s['url']}" for s in result["studies"]]
+        send("*Новые мета-анализы по твоим темам*\n\n" + "\n".join(lines))
+    return {"ok": True, "result": result}
 
 
 @app.get("/workout")

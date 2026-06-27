@@ -296,6 +296,64 @@ async def three_recs(place: str = Body(...), city: str | None = Body(None)) -> d
     return {"ok": True, "result": result}
 
 
+# ---------- Distant-phase engagement ----------
+
+@app.post("/run-distant")
+async def run_distant(notify: bool = False, mark: bool = True) -> dict:
+    """Generate today's proactive engagement question for the morning brief.
+    `mark=True` records the topic as asked (so rotation advances). The morning
+    brief script calls this with notify=false and injects the question itself."""
+    trip = state_bus.get_active_trip()
+    if not trip:
+        return {"error": "no active trip"}
+    phase = orchestrator.detect_phase()
+    if phase["phase"] not in ("scheduled_distant", "pre_trip"):
+        return {"ok": True, "skipped": f"phase={phase['phase']}", "question": ""}
+    result = await asyncio.to_thread(orchestrator.build_distant_engagement, trip)
+    if mark and result.get("topic"):
+        slug = trip.get("slug") or trip["destination"]
+        state_bus.mark_topic_asked(slug, result["topic"], date.today().isoformat())
+    _save_state(result)
+    if notify and result.get("question"):
+        send(result["question"])
+    return {"ok": True, "result": result}
+
+
+@app.post("/distant-weekly")
+async def distant_weekly(notify: bool = True) -> dict:
+    """Weekly summary: decided / learned this week / overall picture."""
+    trip = state_bus.get_active_trip()
+    if not trip:
+        return {"error": "no active trip"}
+    result = await asyncio.to_thread(orchestrator.build_distant_weekly_summary, trip)
+    _save_state(result)
+    if notify and result.get("summary"):
+        send(f"*Поездка {trip['destination']} — недельная сводка*\n\n{result.get('summary', '')}")
+    return {"ok": True, "result": result}
+
+
+@app.post("/log-decision")
+async def log_decision(topic: str = Body(...), note: str = Body(...)) -> dict:
+    """Record a decision Дима made (so engagement stops re-asking and the weekly
+    summary reflects progress). Called by Oru/Hermes after Дима confirms an action."""
+    trip = state_bus.get_active_trip()
+    if not trip:
+        return {"error": "no active trip"}
+    slug = trip.get("slug") or trip["destination"]
+    rec = state_bus.add_decision(slug, topic, note, date.today().isoformat())
+    return {"ok": True, "decisions": rec.get("decisions", [])}
+
+
+@app.get("/engagement")
+def engagement() -> dict:
+    """Debug: current engagement tracker state for the active trip."""
+    trip = state_bus.get_active_trip()
+    if not trip:
+        return {"error": "no active trip"}
+    slug = trip.get("slug") or trip["destination"]
+    return {"slug": slug, "engagement": state_bus.get_engagement(slug)}
+
+
 def _save_state(payload: Any) -> None:
     p = Path(settings.state_file)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -380,6 +438,26 @@ def post_trip_tick() -> None:
     _save_fired(fired)
 
 
+def distant_weekly_tick() -> None:
+    """Weekly (Mon 18:00 Belgrade): in scheduled_distant phase, send the
+    итоговую недельную сводку. Daily engagement rides the morning brief instead."""
+    phase = orchestrator.detect_phase()
+    if phase["phase"] != "scheduled_distant":
+        return
+    trip = phase["trip"]
+    fired = _load_fired()
+    # guard by ISO week so a restart mid-week doesn't double-fire
+    week_tag = date.today().strftime("%G-W%V")
+    if fired.get("distant_weekly") == week_tag:
+        return
+    result = orchestrator.build_distant_weekly_summary(trip)
+    _save_state(result)
+    if result.get("summary"):
+        send(f"*Поездка {trip['destination']} — недельная сводка*\n\n{result.get('summary', '')}")
+    fired["distant_weekly"] = week_tag
+    _save_fired(fired)
+
+
 FIRED_FILE = Path(settings.state_file).parent / "travel-continuity-fired.json"
 
 
@@ -408,6 +486,7 @@ async def main() -> None:
     scheduler.add_job(phase_tick, _parse_cron(settings.phase_check_cron), id="phase-check")
     scheduler.add_job(pretrip_daily_tick, _parse_cron(settings.pretrip_daily_cron), id="pretrip-daily")
     scheduler.add_job(post_trip_tick, _parse_cron("0 9 * * *"), id="post-trip-check")
+    scheduler.add_job(distant_weekly_tick, _parse_cron("0 18 * * 1"), id="distant-weekly")
     scheduler.start()
 
     config = uvicorn.Config(app, host=settings.http_host, port=settings.http_port, log_config=None)

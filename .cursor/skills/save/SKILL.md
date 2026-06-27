@@ -14,7 +14,21 @@ Commits and pushes all changes to GitHub with auto-generated commit messages.
 
 ## Workflow
 
-### 1. Update Workspace Structure (if applicable)
+### 1. Snapshot the live Oru/Hermes runtime
+
+Back up the deployed `~/.hermes` Oru layer (skills, persona, cron jobs, scripts,
+non-secret config + restore manifest) into `backup/hermes/` so this push captures
+it. The script is secret-safe — allowlist only, plus a secret-value scan that
+ABORTS on any leak:
+
+```bash
+bash hermes/backup.sh
+```
+
+If it exits non-zero (secret detected), **STOP** — do not stage or commit. Report
+the offending file. Skip this step only if `hermes/backup.sh` is absent.
+
+### 2. Update Workspace Structure (if applicable)
 
 If `scripts/update_cursorrules_structure.py` exists, run it before staging:
 
@@ -24,7 +38,7 @@ python3 scripts/update_cursorrules_structure.py
 
 Skip this step if the script is not present in the repo.
 
-### 2. Inspect and Stage Changes
+### 3. Inspect and Stage Changes
 
 Run in parallel:
 
@@ -40,7 +54,7 @@ Then stage:
 git add -A
 ```
 
-### 3. Generate Commit Message
+### 4. Generate Commit Message
 
 Analyze staged changes and create a descriptive commit message:
 - Format: `Update workspace: YYYY-MM-DD HH:MM` for routine saves
@@ -48,7 +62,7 @@ Analyze staged changes and create a descriptive commit message:
 
 Do not commit files that likely contain secrets (`.env`, credentials, etc.).
 
-### 4. Commit
+### 5. Commit
 
 ```bash
 git commit -m "Update workspace: $(date '+%Y-%m-%d %H:%M')"
@@ -56,7 +70,7 @@ git commit -m "Update workspace: $(date '+%Y-%m-%d %H:%M')"
 
 Use a descriptive message instead of the timestamp when changes are significant.
 
-### 5. Push
+### 6. Push
 
 ```bash
 git push origin main || git push https://github.com/dmithree/oru.git main

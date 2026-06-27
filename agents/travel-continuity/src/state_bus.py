@@ -60,3 +60,57 @@ def set_active_trip(trip: dict[str, Any] | None) -> None:
     travel = read().get("travel", {})
     travel["active_trip"] = trip
     write_section("travel", travel)
+
+
+# ---------- Distant-phase engagement tracker ----------
+# Keyed by trip slug so a tracker survives across restarts and resets cleanly
+# when the active trip changes. Shape:
+#   travel["engagement"][slug] = {
+#       "covered": {topic_id: {"asked_on": iso, "count": int}},
+#       "last_asked_on": iso_date,
+#       "last_topic": topic_id,
+#       "decisions": [{"on": iso, "topic": id, "note": str}],
+#       "last_weekly_on": iso_date,
+#   }
+
+def get_engagement(slug: str) -> dict[str, Any]:
+    eng = read().get("travel", {}).get("engagement", {})
+    rec = eng.get(slug)
+    if not isinstance(rec, dict):
+        rec = {"covered": {}, "last_asked_on": None, "last_topic": None,
+               "decisions": [], "last_weekly_on": None}
+    rec.setdefault("covered", {})
+    rec.setdefault("decisions", [])
+    rec.setdefault("last_asked_on", None)
+    rec.setdefault("last_topic", None)
+    rec.setdefault("last_weekly_on", None)
+    return rec
+
+
+def save_engagement(slug: str, rec: dict[str, Any]) -> None:
+    travel = read().get("travel", {})
+    eng = travel.get("engagement")
+    if not isinstance(eng, dict):
+        eng = {}
+    eng[slug] = rec
+    travel["engagement"] = eng
+    write_section("travel", travel)
+
+
+def mark_topic_asked(slug: str, topic_id: str, today_iso: str) -> dict[str, Any]:
+    rec = get_engagement(slug)
+    cov = rec["covered"].get(topic_id, {"asked_on": today_iso, "count": 0})
+    cov["asked_on"] = today_iso
+    cov["count"] = int(cov.get("count", 0)) + 1
+    rec["covered"][topic_id] = cov
+    rec["last_asked_on"] = today_iso
+    rec["last_topic"] = topic_id
+    save_engagement(slug, rec)
+    return rec
+
+
+def add_decision(slug: str, topic_id: str, note: str, today_iso: str) -> dict[str, Any]:
+    rec = get_engagement(slug)
+    rec["decisions"].append({"on": today_iso, "topic": topic_id, "note": note})
+    save_engagement(slug, rec)
+    return rec

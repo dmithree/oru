@@ -6,9 +6,12 @@ backfill scripts.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from . import events, linear_writeback, parsers, recurrence, reminders_commands, store
+
+logger = logging.getLogger(__name__)
 
 
 def create(
@@ -24,7 +27,19 @@ def create(
     through parsers.parse_metadata to populate due_at, context_tags,
     effort_min, cog_type, priority, recurrence — and stripped of those
     inline tokens so display stays clean. Explicit kwargs always win
-    over parsed values."""
+    over parsed values.
+    
+    If ext_id is provided and a task with that ext_id already exists in
+    this source, returns the existing task (idempotent for upsert_recurring)."""
+    ext_id = fields.get("ext_id")
+    if ext_id:
+        existing = store.find_by_ext_id(source, ext_id)
+        if existing:
+            # Idempotent upsert: a task with this ext_id already exists
+            # in this source — return it instead of creating a duplicate.
+            logger.info("upsert: ext_id=%s already exists (%s), skipping create", ext_id, existing["id"])
+            return existing
+    
     stored_text = text
     if enrich:
         parsed = parsers.parse_metadata(text)

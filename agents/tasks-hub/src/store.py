@@ -285,7 +285,8 @@ def find_by_ext_id(source: str, ext_id: str) -> Optional[dict[str, Any]]:
             "SELECT * FROM tasks WHERE source = ? AND ext_id = ?",
             (source, ext_id),
         ).fetchone()
-    return _row_to_task(row) if row else None
+    result = _row_to_task(row) if row else None
+    return result
 
 
 # Fields the caller is allowed to update via update_task(). Status

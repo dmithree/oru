@@ -13,7 +13,7 @@ from litellm import completion
 
 from .config import settings
 from . import state_bus
-from .fetchers import oura, strava, tasks, linear, reminders, transcripts
+from .fetchers import oura, strava, tasks, linear, reminders, transcripts, nudges
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,35 @@ def _morning_prompt(data: dict[str, Any]) -> str:
     signal_line = ""
     if context_signal.get("health_state") == "recovery_needed":
         signal_line = "\nВажный сигнал: today is a recovery day — план задач уже урезан вдвое, в брифе подсветить."
-    if context_signal.get("traveling_to"):
+
+    # Cross-domain proactive nudges (health, travel, ...), ranked by urgency.
+    # Each domain exposes ONE question/day via the uniform contract; the brief
+    # renders them as a single «Сегодня двигаем» section. Verbatim — no passive
+    # status lines invented by the LLM.
+    nudges = data.get("nudges") or []
+    travel_nudge = next((n for n in nudges if n.get("domain") == "travel"), None)
+    days_until = travel_nudge.get("days_until") if travel_nudge else None
+    # Only force a first-line travel mention when imminent/active (≤7 дн).
+    if context_signal.get("traveling_to") and (days_until is None or days_until <= 7):
         signal_line += f"\nВажный сигнал: traveling to {context_signal['traveling_to']} — упомянуть в первой строке."
+
+    nudge_block = ""
+    if nudges:
+        labels = {"health": "Здоровье", "travel": "Поездка"}
+        lines = []
+        for n in nudges:
+            dom = labels.get(n["domain"], n["domain"])
+            tag = n.get("topic_label") or ""
+            header = f"{dom}" + (f" ({tag})" if tag else "")
+            if n["domain"] == "travel" and n.get("days_until") is not None:
+                header += f", до старта {n['days_until']} дн."
+            lines.append(f"- {header}: {n['question']}")
+        nudge_block = (
+            "\n\n«Сегодня двигаем» — вставь СЛЕДУЮЩИЕ пункты VERBATIM отдельной "
+            "секцией в конце брифа, каждый своим буллетом, в этом порядке "
+            "(по убыванию срочности). Не перефразируй, не сокращай, не добавляй "
+            "пассивных статусных строк:\n" + "\n".join(lines)
+        )
 
     return f"""Ты Oru, личный AI-ассистент Димы. Сформируй утренний бриф на {weekday_ru} {today.day}.{today.month}.{today.year}.
 
@@ -43,6 +70,7 @@ def _morning_prompt(data: dict[str, Any]) -> str:
 - Прямой тон. Без приветствий "Доброе утро, дорогой". Дима не любит сахар.
 - Конкретика: цифры, имена, точное время. Если данных нет — пропусти, не выдумывай.
 - Без слов-паразитов: "просто", "по сути", "в общем".
+- Про поездку и здоровье в секции «Сегодня двигаем» пиши ТОЛЬКО то, что дано ниже. Не выдумывай статусных строк.
 
 Структура (только секции у которых есть данные; пустые — пропусти):
 
@@ -55,10 +83,10 @@ def _morning_prompt(data: dict[str, Any]) -> str:
 today_due, plan_333_deep/short/admin, waiting, recent_open):
 
 {sections_block or "(tasks-hub недоступен — пропусти этот блок)"}
-{signal_line}
+{signal_line}{nudge_block}
 
 Данные (для секций состояния тела / Strava / транскриптов):
-{json.dumps({k: v for k, v in data.items() if k not in {"tasks_hub_sections_markdown", "tasks_hub_context_applied", "tasks_hub_sections"}}, ensure_ascii=False, indent=2)}
+{json.dumps({k: v for k, v in data.items() if k not in {"tasks_hub_sections_markdown", "tasks_hub_context_applied", "tasks_hub_sections", "nudges"}}, ensure_ascii=False, indent=2)}
 
 Бриф:"""
 
@@ -169,6 +197,7 @@ def build_morning_brief() -> dict[str, Any]:
     reminders_data = reminders.fetch_today_reminders()
     recent_transcripts = transcripts.fetch_recent_transcripts(TRANSCRIPT_DIRS)
     context = state_bus.read()
+    all_nudges = nudges.fetch_all_nudges()
 
     raw = {
         "oura": oura_data,
@@ -180,9 +209,13 @@ def build_morning_brief() -> dict[str, Any]:
         "transcript_snippets": [t["content"][:1000] for t in recent_transcripts],
         "personal_context": {
             "health": context.get("health", {}),
-            "travel": context.get("travel", {}),
             "briefing": context.get("briefing", {}),
         },
+        # Cross-domain proactive nudges (health, travel, ...). Each domain
+        # exposes ONE question/day via the uniform contract; ranked by urgency
+        # and rendered verbatim as «Сегодня двигаем» by _morning_prompt. We no
+        # longer dump raw trip/health-status data that produced passive lines.
+        "nudges": all_nudges,
         # Hand-off to the LLM prompt — verbatim block + context signal.
         "tasks_hub_sections_markdown": sections_md,
         "tasks_hub_context_applied": context_applied,

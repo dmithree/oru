@@ -17,6 +17,7 @@ HTTP:
 import asyncio
 import json
 import logging
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -169,15 +170,31 @@ def do_morning(notify: bool = True) -> dict:
 
 
 def do_evening_prompt(notify: bool = True) -> dict:
-    """Send the question and set a pending-debrief flag."""
-    question = "Как прошёл день? Что сделал из плана. Что зашло / не зашло. Инсайты."
+    """Send the question and set a pending-debrief flag.
+
+    The question opens with "Как прошёл день?", asks about ONE specific
+    task pulled from today's brief, and invites freeform extras.
+    """
+    open_tasks = tasks.read_open_tasks(limit=15)
+    if open_tasks:
+        picked = random.choice(open_tasks)
+        question = (
+            "Как прошёл день? "
+            f"Удалось продвинуться по задаче «{picked}»?\n\n"
+            "Если сделал что-то ещё или узнал полезное, расскажи — запомню."
+        )
+    else:
+        question = (
+            "Как прошёл день? Что сделал, что зашло / не зашло.\n\n"
+            "Если сделал что-то ещё или узнал полезное, расскажи — запомню."
+        )
     PENDING_DEBRIEF_FILE.parent.mkdir(parents=True, exist_ok=True)
     PENDING_DEBRIEF_FILE.write_text(
         json.dumps({"started_at": datetime.now().isoformat(), "question": question}, ensure_ascii=False),
         encoding="utf-8",
     )
     if notify:
-        send(f"_Вечерний debrief_\n\n{question}")
+        send(question)
     return {"question": question, "pending_set_at": datetime.now().isoformat()}
 
 
@@ -187,7 +204,10 @@ def _parse_cron(expr: str) -> CronTrigger:
 
 
 async def _morning_job() -> None:
-    await asyncio.to_thread(do_morning, True)
+    # notify=False: контейнер генерит и сохраняет бриф, но НЕ шлёт его сам.
+    # Доставка утреннего брифа принадлежит Hermes-cron (job "Morning briefing (Oru)"),
+    # который тянет данные через oru/hermes/scripts/morning_briefing_data.sh.
+    await asyncio.to_thread(do_morning, False)
 
 
 async def _evening_job() -> None:
